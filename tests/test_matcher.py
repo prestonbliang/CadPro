@@ -53,3 +53,22 @@ def test_missing_solid_is_removed():
 def test_empty_base_is_all_added():
     (diff,) = match_solids([], [BASE_BOX])
     assert diff.status == "added"
+
+
+def test_unrelated_solids_are_removed_and_added_not_force_matched():
+    # A tiny bracket and a huge, distant plate as the only solid on each side
+    # must not become "the bracket turned into a plate" just because
+    # Hungarian assignment always pairs whatever's left over.
+    tiny_bracket = SolidFingerprint(
+        name="bracket", volume=100.0, surface_area=200.0,
+        center_of_mass=(0.0, 0.0, 0.0), bbox_min=(0.0, 0.0, 0.0), bbox_max=(5.0, 5.0, 4.0),
+    )
+    huge_plate = SolidFingerprint(
+        name="plate", volume=500_000.0, surface_area=90_000.0,
+        center_of_mass=(2000.0, 2000.0, 2000.0), bbox_min=(0.0, 0.0, 0.0), bbox_max=(500.0, 500.0, 2.0),
+    )
+
+    diffs = match_solids([tiny_bracket], [huge_plate])
+
+    statuses = sorted(d.status for d in diffs)
+    assert statuses == ["added", "removed"]

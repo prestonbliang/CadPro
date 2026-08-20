@@ -12,7 +12,10 @@ UNCHANGED_COM_TOL = 1e-4  # mm
 
 # Above this, two fingerprints are too dissimilar to be the same solid at all —
 # treat them as separate added/removed rather than a wildly "modified" match.
-NOT_A_MATCH_COST = 1e18
+# Solids can legitimately move further than faces during a real edit (a part
+# getting repositioned in an assembly), so this is looser than the face-level
+# equivalent (TIER1_REJECT_COST in face_matcher.py).
+NOT_A_MATCH_COST = 5.0
 
 
 def _cost(a: SolidFingerprint, b: SolidFingerprint) -> float:
@@ -39,6 +42,8 @@ def match_solids(base: list[SolidFingerprint], modified: list[SolidFingerprint])
     diffs: list[SolidDiff] = []
 
     for i, j in zip(base_idx, mod_idx):
+        if cost_matrix[i][j] > NOT_A_MATCH_COST:
+            continue  # too dissimilar to be the same solid — leave for removed/added below
         a, b = base[i], modified[j]
         volume_delta = abs(a.volume - b.volume)
         com_delta = math.dist(a.center_of_mass, b.center_of_mass)
