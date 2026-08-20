@@ -1,0 +1,28 @@
+[project]
+name = "cad-diff"
+version = "0.0.1"
+description = "Semantic version control for mechanical CAD — a git-diff for solid geometry."
+requires-python = ">=3.10"
+dependencies = [
+    "cadquery-ocp-novtk",
+    "numpy",
+    "scipy",
+    "networkx",
+    "rich",
+    "typer",
+    "pygltflib",
+    "jinja2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+cad-diff = "cad_diff.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
