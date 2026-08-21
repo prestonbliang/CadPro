@@ -8,7 +8,9 @@ from OCP.TCollection import TCollection_ExtendedString
 from OCP.TDataStd import TDataStd_Name
 from OCP.TDF import TDF_Label, TDF_LabelSequence
 from OCP.TDocStd import TDocStd_Document
-from OCP.TopoDS import TopoDS_Shape
+from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopoDS import TopoDS, TopoDS_Shape
 from OCP.XCAFApp import XCAFApp_Application
 from OCP.XCAFDoc import XCAFDoc_DocumentTool
 
@@ -31,10 +33,29 @@ def load_step(path: str | Path) -> list[tuple[str, TopoDS_Shape]]:
     labels = TDF_LabelSequence()
     shape_tool.GetFreeShapes(labels)
 
-    return [
-        (_label_name(labels.Value(i), fallback=f"solid_{i}"), shape_tool.GetShape_s(labels.Value(i)))
-        for i in range(1, labels.Length() + 1)
-    ]
+    solids: list[tuple[str, TopoDS_Shape]] = []
+    for i in range(1, labels.Length() + 1):
+        name = _label_name(labels.Value(i), fallback=f"solid_{i}")
+        shape = shape_tool.GetShape_s(labels.Value(i))
+        children = _solids_in(shape)
+        if len(children) == 1:
+            solids.append((name, children[0]))
+        else:
+            solids.extend((f"{name}_{index}", child) for index, child in enumerate(children, start=1))
+
+    if not solids:
+        raise RuntimeError(f"STEP file contains no solid geometry: {path}")
+    return solids
+
+
+def _solids_in(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
+    """Flatten compounds/assemblies into located solid occurrences."""
+    explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    solids = []
+    while explorer.More():
+        solids.append(TopoDS.Solid_s(explorer.Current()))
+        explorer.Next()
+    return solids
 
 
 def _label_name(label: TDF_Label, fallback: str) -> str:

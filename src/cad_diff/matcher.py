@@ -8,7 +8,9 @@ from cad_diff.diff_model import SolidDiff, SolidFingerprint
 
 # Below this, a delta is STEP round-trip noise, not a real geometric change.
 UNCHANGED_VOLUME_TOL = 1e-4  # mm^3
+UNCHANGED_AREA_TOL = 1e-4  # mm^2
 UNCHANGED_COM_TOL = 1e-4  # mm
+UNCHANGED_BBOX_TOL = 1e-4  # mm
 
 # Above this, two fingerprints are too dissimilar to be the same solid at all —
 # treat them as separate added/removed rather than a wildly "modified" match.
@@ -25,6 +27,13 @@ def _cost(a: SolidFingerprint, b: SolidFingerprint) -> float:
     # Scale-relative: a 1mm^3 shift matters on a small bracket, not on a chassis.
     scale = max(a.volume, b.volume, 1.0)
     return (volume_delta + area_delta) / scale + com_delta
+
+
+def _max_bbox_delta(a: SolidFingerprint, b: SolidFingerprint) -> float:
+    return max(
+        abs(left - right)
+        for left, right in zip((*a.bbox_min, *a.bbox_max), (*b.bbox_min, *b.bbox_max))
+    )
 
 
 def match_solids(base: list[SolidFingerprint], modified: list[SolidFingerprint]) -> list[SolidDiff]:
@@ -46,8 +55,17 @@ def match_solids(base: list[SolidFingerprint], modified: list[SolidFingerprint])
             continue  # too dissimilar to be the same solid — leave for removed/added below
         a, b = base[i], modified[j]
         volume_delta = abs(a.volume - b.volume)
+        area_delta = abs(a.surface_area - b.surface_area)
         com_delta = math.dist(a.center_of_mass, b.center_of_mass)
-        status = "unchanged" if volume_delta < UNCHANGED_VOLUME_TOL and com_delta < UNCHANGED_COM_TOL else "modified"
+        bbox_delta = _max_bbox_delta(a, b)
+        status = (
+            "unchanged"
+            if volume_delta < UNCHANGED_VOLUME_TOL
+            and area_delta < UNCHANGED_AREA_TOL
+            and com_delta < UNCHANGED_COM_TOL
+            and bbox_delta < UNCHANGED_BBOX_TOL
+            else "modified"
+        )
         diffs.append(SolidDiff(status=status, base=a, modified=b))
         matched_base.add(i)
         matched_mod.add(j)

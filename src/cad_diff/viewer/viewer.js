@@ -16,6 +16,8 @@ function buildLegend(statusesPresent) {
   for (const status of statusesPresent) {
     const row = document.createElement("label");
     row.className = "legend-row";
+    row.dataset.status = status;
+    row.dataset.visible = "true";
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -83,6 +85,7 @@ function init(glbBase64) {
     document.querySelectorAll("#legend input[type=checkbox]").forEach((checkbox) => {
       checkbox.addEventListener("change", () => {
         for (const mesh of meshesByStatus[checkbox.dataset.status]) mesh.visible = checkbox.checked;
+        checkbox.closest(".legend-row").dataset.visible = String(checkbox.checked);
       });
     });
     document.getElementById("loading").style.display = "none";

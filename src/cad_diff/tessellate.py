@@ -23,19 +23,28 @@ def tessellate_shape(shape: TopoDS_Shape, linear_deflection: float = 0.1) -> dic
     """Triangulate every face of a shape, keyed by the same 1-based index
     face_signatures.py uses (a TopTools_IndexedMapOfShape over TopAbs_FACE),
     so tessellated triangles can be matched back to a face's diff status."""
-    BRepMesh_IncrementalMesh(shape, linear_deflection)
+    try:
+        mesher = BRepMesh_IncrementalMesh(shape, linear_deflection)
+    except Exception as exc:
+        raise RuntimeError("OpenCascade failed while tessellating the shape") from exc
+    if not mesher.IsDone():
+        raise RuntimeError(f"OpenCascade did not complete tessellation (status flags: {mesher.GetStatusFlags()})")
 
     face_map = TopTools_IndexedMapOfShape()
     TopExp.MapShapes_s(shape, TopAbs_FACE, face_map)
+    if face_map.Extent() == 0:
+        raise RuntimeError("Shape contains no faces to tessellate")
 
-    return {i: _tessellate_face(TopoDS.Face_s(face_map.FindKey(i))) for i in range(1, face_map.Extent() + 1)}
+    return {i: _tessellate_face(TopoDS.Face_s(face_map.FindKey(i)), i) for i in range(1, face_map.Extent() + 1)}
 
 
-def _tessellate_face(face) -> FaceMesh:
+def _tessellate_face(face, face_index: int) -> FaceMesh:
     location = TopLoc_Location()
     triangulation = BRep_Tool.Triangulation_s(face, location)
     if triangulation is None:
-        return FaceMesh(vertices=[], triangles=[])
+        raise RuntimeError(f"OpenCascade produced no triangulation for face {face_index}")
+    if triangulation.NbNodes() == 0 or triangulation.NbTriangles() == 0:
+        raise RuntimeError(f"OpenCascade produced an empty triangulation for face {face_index}")
 
     transform = location.Transformation()
     vertices = [_point(triangulation.Node(i), transform) for i in range(1, triangulation.NbNodes() + 1)]

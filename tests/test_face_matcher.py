@@ -108,3 +108,12 @@ def test_param_deltas_report_the_dimensional_change():
 
     assert diff.status == "modified"
     assert diff.param_deltas == {"radius": 2.0}
+
+
+def test_param_change_cannot_hide_behind_equal_area_and_centroid():
+    base = [_face(1, "Cylinder", 31.42, (0, 0, 0), [], params={"radius": 2.0})]
+    modified = [_face(1, "Cylinder", 31.42, (0, 0, 0), [], params={"radius": 4.0})]
+
+    (diff,) = match_faces(base, modified)
+
+    assert diff.status == "modified"

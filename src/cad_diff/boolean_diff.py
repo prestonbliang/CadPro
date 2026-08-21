@@ -14,14 +14,38 @@ def _volume_of(shape: TopoDS_Shape) -> float:
     return props.Mass()
 
 
+def _run_boolean(
+    operation_type,
+    left: TopoDS_Shape,
+    right: TopoDS_Shape,
+    description: str,
+) -> TopoDS_Shape:
+    """Run one OpenCascade boolean and reject incomplete or null results."""
+    try:
+        operation = operation_type(left, right)
+    except Exception as exc:
+        raise RuntimeError(f"Boolean {description} could not be started") from exc
+
+    if not operation.IsDone():
+        raise RuntimeError(f"Boolean {description} did not complete")
+
+    try:
+        result = operation.Shape()
+    except Exception as exc:
+        raise RuntimeError(f"Boolean {description} completed without a readable result") from exc
+    if result.IsNull():
+        raise RuntimeError(f"Boolean {description} produced a null shape")
+    return result
+
+
 def boolean_cross_check(base: TopoDS_Shape, modified: TopoDS_Shape) -> BooleanCrossCheck:
     """Tier 5: independent volumetric ground truth via boolean ops — the same
     technique SolidWorks's own Compare Geometry tool uses internally. Slow on
     complex many-body assemblies and blind to internal/hidden faces; used here
     as a cross-check on the face matcher's classification, not a replacement."""
-    added = BRepAlgoAPI_Cut(modified, base).Shape()
-    removed = BRepAlgoAPI_Cut(base, modified).Shape()
-    common = BRepAlgoAPI_Common(base, modified).Shape()
+    added = _run_boolean(BRepAlgoAPI_Cut, modified, base, "added-volume cut")
+    removed = _run_boolean(BRepAlgoAPI_Cut, base, modified, "removed-volume cut")
+    common = _run_boolean(BRepAlgoAPI_Common, base, modified, "common-volume intersection")
     return BooleanCrossCheck(
         added_volume=_volume_of(added),
         removed_volume=_volume_of(removed),

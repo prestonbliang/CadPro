@@ -30,6 +30,19 @@ def test_volume_change_is_modified():
     assert diff.volume_delta == pytest.approx(628.319)
 
 
+def test_equal_volume_and_center_but_different_geometry_is_modified():
+    reshaped = _shifted(
+        BASE_BOX,
+        surface_area=3900.0,
+        bbox_min=(-1.0, 0.0, 0.0),
+        bbox_max=(41.0, 30.0, 10.0),
+    )
+
+    (diff,) = match_solids([BASE_BOX], [reshaped])
+
+    assert diff.status == "modified"
+
+
 def test_extra_solid_is_added():
     bolt = SolidFingerprint(
         name="bolt", volume=565.5, surface_area=433.5,
