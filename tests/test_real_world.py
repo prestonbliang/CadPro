@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from cad_diff.boolean_diff import boolean_cross_check
 from cad_diff.face_matcher import match_faces
 from cad_diff.face_signatures import extract_faces
 from cad_diff.matcher import match_solids
@@ -69,6 +70,50 @@ def test_real_hole_edit_is_isolated_not_a_false_positive_storm():
     for modified_diff in by_status["modified"]:
         # cross-sectional area of a 0.3mm-radius hole through a wall
         assert modified_diff.area_delta == pytest.approx(-0.2827, abs=1e-3)
+
+
+def test_fusion_360_part_loads_and_isolates_a_real_edit():
+    # A different real CAD kernel's export pipeline than the SolidWorks
+    # files above (see NOTICE.md) -- same face-level correctness bar: a
+    # local edit must stay local, not cascade into spurious changes.
+    base_shape, = (s for _, s in load_step(REAL_WORLD / "tactile_switch_v1.step"))
+    mod_shape, = (s for _, s in load_step(REAL_WORLD / "tactile_switch_v2_hole.step"))
+
+    diffs = match_faces(extract_faces(base_shape), extract_faces(mod_shape))
+    by_status = {}
+    for d in diffs:
+        by_status.setdefault(d.status, []).append(d)
+
+    assert len(by_status.get("added", [])) > 0
+    assert len(by_status.get("modified", [])) > 0
+    assert len(by_status.get("unchanged", [])) > len(diffs) / 2  # most of the part is untouched
+
+
+def test_boolean_cross_check_is_reliable_on_the_cleaner_real_edit():
+    # Not every real STEP pair trips the tolerance-mismatch failure mode --
+    # the sam_cavity edit's boolean cross-check agrees with the face-level
+    # volume delta, and should be reported as trustworthy.
+    base_shape, = (s for _, s in load_step(REAL_WORLD / "sam_cavity_v1.step"))
+    mod_shape, = (s for _, s in load_step(REAL_WORLD / "sam_cavity_v2_hole.step"))
+
+    result = boolean_cross_check(base_shape, mod_shape)
+
+    assert result.reliable is True
+    assert result.removed_volume == pytest.approx(0.311, abs=1e-2)
+
+
+def test_boolean_cross_check_flags_itself_unreliable_instead_of_lying():
+    # On this real Fusion-360-exported part, BRepAlgoAPI_Cut reports
+    # IsDone() while producing a geometrically invalid result (a real STEP
+    # round-trip tolerance mismatch) -- it must not be reported as if it
+    # were trustworthy ground truth (this was a real bug: it printed
+    # "+1768/-1772mm3" for an actual ~4mm3 edit before this was caught).
+    base_shape, = (s for _, s in load_step(REAL_WORLD / "tactile_switch_v1.step"))
+    mod_shape, = (s for _, s in load_step(REAL_WORLD / "tactile_switch_v2_hole.step"))
+
+    result = boolean_cross_check(base_shape, mod_shape)
+
+    assert result.reliable is False
 
 
 def test_bspline_surfaces_survive_a_real_edit_without_crashing():

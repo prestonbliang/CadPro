@@ -43,10 +43,11 @@ reported as a modified face with a dimensional delta — not an unmatched delete
   map, so it opens with zero network access and zero server, drag-into-browser or
   attach-to-Slack.
 
-**Real-world validation, partial:** `examples/real_world/` holds a genuine u-blox
-product assembly — a housing, PCB, and antenna, real SolidWorks 2014 parts, one with
-actual free-form `BSplineSurface` faces — not an OCP-synthetic fixture (see
-`NOTICE.md` for source and license). Findings:
+**Real-world validation, two vendors now:** `examples/real_world/` holds real,
+non-OCP-authored parts from two different CAD export pipelines — a u-blox SolidWorks
+2014 assembly (housing, PCB, antenna — one with actual free-form `BSplineSurface`
+faces) and an Adafruit Fusion 360 part, both real products, not synthetic fixtures
+(see `NOTICE.md` for source and license on each). Findings:
 - The XCAF loader originally treated a real assembly as one opaque compound. Real
   assemblies decompose into multiple named leaf solids (`load_step` now walks and
   positions them recursively); fixed after this file exposed it.
@@ -55,15 +56,22 @@ actual free-form `BSplineSurface` faces — not an OCP-synthetic fixture (see
 - Re-exporting the same real assembly in a different STEP schema (AP203 → AP214, 23
   seconds apart, same SolidWorks session) correctly reports all three parts unchanged —
   zero false positives from schema noise.
-- A genuine small edit (a 0.3mm hole cut into a real 54-face housing wall) stays
-  correctly localized: exactly 1 added face + 2 modified faces out of 55, not a cascade
-  of spurious changes. The real `BSplineSurface` faces on the antenna participate in
-  matching correctly and never get a fabricated dimensional delta.
+- A genuine small edit (a 0.3mm hole cut into a real 54-face SolidWorks housing wall)
+  stays correctly localized: exactly 1 added face + 2 modified faces out of 55, not a
+  cascade of spurious changes. The real `BSplineSurface` faces on the antenna
+  participate in matching correctly and never get a fabricated dimensional delta.
+- The same edit on the real Fusion 360 part exposed a second real bug: Tier 5's boolean
+  cross-check (`BRepAlgoAPI_Cut`) reported success (`IsDone() == True`) while producing
+  a geometrically **invalid** result — two independently STEP-round-tripped copies of
+  "the same" solid don't align to sub-micron tolerance everywhere, and the boolean op
+  silently degenerated instead of failing loudly. It printed `+1768/-1772mm³` for an
+  actual ~4mm³ edit. Fixed by checking `BRepCheck_Analyzer(...).IsValid()` and refusing
+  to report the cross-check as trustworthy when it isn't — the face-level diff (which
+  stayed correct throughout) is the one you should trust either way.
 
-**Still open — the actual go/no-go gate:** this is one company's SolidWorks exports.
-True cross-*vendor* fidelity (the same part re-exported from SolidWorks vs. Fusion 360
-vs. NX vs. Creo) is still untested — cross-kernel STEP fidelity is documented to vary
-significantly, and I don't have those CAD packages to produce that data.
+**Still open — the actual go/no-go gate:** two vendors (SolidWorks, Fusion 360) is
+real progress but not the full picture. NX and Creo exports remain untested, and I
+don't have those CAD packages to produce that data myself.
 
 **Also honest:** the `--html` viewer's rendering pipeline (WebGL, DOM, OrbitControls)
 is unverified in a real browser — this sandbox has no attached display and every

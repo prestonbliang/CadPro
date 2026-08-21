@@ -1,7 +1,6 @@
-"""Regenerates the derived real-world fixtures from SAM_AP203.STEP: real,
-SolidWorks-authored parts (not OCP-synthetic) with a small, deliberate,
-verified-in-material edit cut into each — a housing wall (planes + a few
-cylinders) and the antenna (which has genuine BSplineSurface faces).
+"""Regenerates the derived real-world fixtures: real, non-OCP-authored parts
+(SolidWorks and Fusion 360) with a small, deliberate, verified-in-material
+edit cut into each. See NOTICE.md for provenance and licensing.
 
 The hole location for each part was found by scanning with
 BRepClass3d_SolidClassifier — these parts have real internal cavities, so an
@@ -21,12 +20,12 @@ from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
 from cad_diff.step_io import load_step
 
 HERE = Path(__file__).parent
-SOURCE = HERE / "SAM_AP203.STEP"
 
-# (part name in the assembly, hole center, hole radius, hole length)
+# (source file, part name within it, output slug, hole center, hole direction, hole radius, hole length)
 EDITS = [
-    ("Sam cavity", gp_Pnt(-10.0, -2.0, 8.0), 0.3, 3.0),
-    ("SAM ANT", gp_Pnt(-10.0, 0.0, 6.0), 0.4, 8.0),
+    (HERE / "SAM_AP203.STEP", "Sam cavity", "sam_cavity", gp_Pnt(-10.0, -2.0, 8.0), (0.0, 1.0, 0.0), 0.3, 3.0),
+    (HERE / "SAM_AP203.STEP", "SAM ANT", "sam_ant", gp_Pnt(-10.0, 0.0, 6.0), (0.0, 1.0, 0.0), 0.4, 8.0),
+    (HERE / "tactile_switch.step", "Tactile On/Off Button v3", "tactile_switch", gp_Pnt(-6.42, -8.33, -1.0), (0.0, 0.0, 1.0), 0.5, 10.0),
 ]
 
 
@@ -37,14 +36,15 @@ def write_step(shape, path: Path) -> None:
 
 
 def main() -> None:
-    parts = dict(load_step(SOURCE))
-    for name, center, radius, length in EDITS:
-        shape = parts[name]
-        slug = name.lower().replace(" ", "_")
+    parts_by_source: dict[Path, dict[str, object]] = {}
+    for source, part_name, slug, center, direction, radius, length in EDITS:
+        if source not in parts_by_source:
+            parts_by_source[source] = dict(load_step(source))
+        shape = parts_by_source[source][part_name]
 
         write_step(shape, HERE / f"{slug}_v1.step")
 
-        hole_axis = gp_Ax2(center, gp_Dir(0.0, 1.0, 0.0))
+        hole_axis = gp_Ax2(center, gp_Dir(*direction))
         hole = BRepPrimAPI_MakeCylinder(hole_axis, radius, length).Shape()
         modified = BRepAlgoAPI_Cut(shape, hole).Shape()
         write_step(modified, HERE / f"{slug}_v2_hole.step")

@@ -37,11 +37,15 @@ def print_report(report: DiffReport, console: Console | None = None) -> None:
 def _print_face_detail(solid_face_diff, console: Console) -> None:
     name = (solid_face_diff.solid.modified or solid_face_diff.solid.base).name
     b = solid_face_diff.boolean
-    console.print(
-        f"\n[bold]{name}[/bold] face detail  "
-        f"[dim](boolean cross-check: +{b.added_volume:.3f} / -{b.removed_volume:.3f} mm³, "
-        f"tier 5 ground truth)[/dim]"
-    )
+    if b.reliable:
+        cross_check = f"boolean cross-check: +{b.added_volume:.3f} / -{b.removed_volume:.3f} mm³, tier 5 ground truth"
+    else:
+        cross_check = (
+            "[bold red]boolean cross-check: unavailable[/bold red] — the boolean op produced invalid "
+            "geometry (a real STEP round-trip tolerance mismatch, not a face-matcher error); trust the "
+            "face-level diff below instead"
+        )
+    console.print(f"\n[bold]{name}[/bold] face detail  [dim]({cross_check})[/dim]")
 
     table = Table()
     table.add_column("Face")

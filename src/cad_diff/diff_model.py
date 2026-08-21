@@ -77,11 +77,15 @@ class FaceDiff:
 @dataclass(frozen=True)
 class BooleanCrossCheck:
     """Tier 5 ground truth: what BRepAlgoAPI_Cut/Common say actually changed,
-    independent of face correspondence — the ground truth the face matcher is checked against."""
+    independent of face correspondence — the ground truth the face matcher is
+    checked against. On real STEP data the boolean op can report success
+    while producing an invalid result (see boolean_diff.py) — check
+    `reliable` before trusting the volumes."""
 
     added_volume: float
     removed_volume: float
     common_volume: float
+    reliable: bool
 
 
 @dataclass(frozen=True)
