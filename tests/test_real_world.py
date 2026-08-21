@@ -116,6 +116,27 @@ def test_boolean_cross_check_flags_itself_unreliable_instead_of_lying():
     assert result.reliable is False
 
 
+def test_shielding_cover_edit_is_isolated_and_boolean_check_is_reliable():
+    # A different real part than sam_cavity (114 faces vs. 54, thin
+    # sheet-metal-style geometry) -- confirms the Tier 5 tolerance-mismatch
+    # failure mode isn't universal on real data, it's genuinely per-pair.
+    base_shape, = (s for _, s in load_step(REAL_WORLD / "shielding_cover_v1.step"))
+    mod_shape, = (s for _, s in load_step(REAL_WORLD / "shielding_cover_v2_hole.step"))
+
+    diffs = match_faces(extract_faces(base_shape), extract_faces(mod_shape))
+    by_status = {}
+    for d in diffs:
+        by_status.setdefault(d.status, []).append(d)
+
+    assert len(by_status.get("added", [])) == 1
+    assert len(by_status.get("modified", [])) == 2
+    assert "removed" not in by_status
+
+    result = boolean_cross_check(base_shape, mod_shape)
+    assert result.reliable is True
+    assert result.removed_volume == pytest.approx(0.057, abs=1e-2)
+
+
 def test_bspline_surfaces_survive_a_real_edit_without_crashing():
     # SAM ANT has genuine free-form BSplineSurface faces (not just planes and
     # cylinders) — this is the highest-complexity real surface type STEP has,

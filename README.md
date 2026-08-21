@@ -68,10 +68,19 @@ faces) and an Adafruit Fusion 360 part, both real products, not synthetic fixtur
   actual ~4mm³ edit. Fixed by checking `BRepCheck_Analyzer(...).IsValid()` and refusing
   to report the cross-check as trustworthy when it isn't — the face-level diff (which
   stayed correct throughout) is the one you should trust either way.
+- Scale, not just vendor diversity: a real 7MB, 4-part, 1700+-face SolidWorks assembly
+  (same license grant, source in `NOTICE.md`) loaded in ~5s; its 811-face PCB
+  self-diffed in 0.33s, including a 671×671 Hungarian assignment for Tier 1's Plane
+  bucket — no scaling cliff at real-world part complexity. A second real edit, on a
+  114-face sheet-metal-style part from that assembly, confirmed the boolean-cross-check
+  failure above isn't universal on real data — it's genuinely per-pair, and this one
+  came back reliable and correct.
 
 **Still open — the actual go/no-go gate:** two vendors (SolidWorks, Fusion 360) is
-real progress but not the full picture. NX and Creo exports remain untested, and I
-don't have those CAD packages to produce that data myself.
+real progress but not the full picture. NX, Creo, and CATIA exports remain untested —
+they're rare in freely-licensed public repos (checked several candidates: no LICENSE
+file, or a curated aggregator with per-file licensing too ambiguous to trust blind),
+and I don't have those CAD packages to produce clean data myself.
 
 **Also honest:** the `--html` viewer's rendering pipeline (WebGL, DOM, OrbitControls)
 is unverified in a real browser — this sandbox has no attached display and every

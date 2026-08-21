@@ -26,3 +26,12 @@ Source: [adafruit/Adafruit_CAD_Parts](https://github.com/adafruit/Adafruit_CAD_P
 `tactile_switch_v1/v2_hole.step` are derived from the real parts above, each with a
 small hole cut at a verified in-material point (see `generate_derived.py` —
 regenerate with `.venv/bin/python examples/real_world/generate_derived.py`).
+
+`shielding_cover_v1/v2_hole.step` is the "SHIELDING_COVER_FOR_PAM_Default" part (a
+real 114-face sheet-metal-style SolidWorks part, with a verified-in-material edit) from
+[u-blox/3D-Step-Models-Library](https://github.com/u-blox/3D-Step-Models-Library)'s
+`POS/PAM.STEP` (SolidWorks 2011, same license grant as above) — a 7MB, 4-part, 1700+
+face real assembly used to stress-test extraction and matching at real scale (an
+811-face real PCB self-diffed in 0.33s, including a 671×671 Hungarian assignment). The
+full source assembly isn't vendored here to avoid repo bloat; only this one part's
+before/after pair is, re-exported via cad-diff's own writer from the loaded shape.

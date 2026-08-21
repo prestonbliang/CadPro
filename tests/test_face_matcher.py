@@ -108,3 +108,21 @@ def test_param_deltas_report_the_dimensional_change():
 
     assert diff.status == "modified"
     assert diff.param_deltas == {"radius": 2.0}
+
+
+def test_large_single_type_bucket_stays_fast():
+    # A real 811-face PCB (see examples/real_world/NOTICE.md) put 671 faces
+    # in a single Plane bucket for Tier 1 and self-diffed in 0.33s --
+    # confirming scipy's linear_sum_assignment on a 671x671 cost matrix
+    # isn't a scaling cliff. That PCB isn't vendored here (would mean
+    # shipping its 7MB source assembly); this locks in a bound on the same
+    # scale with clean synthetic data, isolating the actual risk (bucket
+    # size) without depending on an unvendored real fixture.
+    import time
+
+    faces = [_face(i, "Plane", 10.0 + i * 0.01, (float(i), 0.0, 0.0), []) for i in range(1, 701)]
+
+    t0 = time.time()
+    diffs = match_faces(faces, faces)
+    assert time.time() - t0 < 5.0
+    assert all(d.status == "unchanged" for d in diffs)
