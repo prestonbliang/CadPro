@@ -1,7 +1,7 @@
 [project]
-name = "cad-diff"
-version = "0.0.1"
-description = "Semantic version control for mechanical CAD — a git-diff for solid geometry."
+name = "cadpro"
+version = "0.1.0"
+description = "Convert image and video silhouettes into editable, solid STEP geometry."
 requires-python = ">=3.10"
 dependencies = [
     "cadquery-ocp-novtk",
@@ -12,12 +12,14 @@ dependencies = [
     "typer",
     "pygltflib",
     "jinja2",
+    "opencv-python-headless>=4.10",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
 
 [project.scripts]
+cadpro = "cadpro.cli:app"
 cad-diff = "cad_diff.cli:app"
 
 [build-system]
