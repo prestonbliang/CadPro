@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b0f14">
-  <meta name="description" content="Turn a complete photo orbit or turntable video into validated STEP and mesh geometry.">
+  <meta name="description" content="Turn one clean object image into a measured, validated STEP profile solid.">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="CadPro — Real geometry from a complete orbit">
-  <meta property="og:description" content="Turn 20–50 ordered photos or a complete turntable video into validated STEP, STL, and GLB geometry.">
-  <meta property="og:image" content="__CADPRO_ORIGIN__/static/og.png">
+  <meta property="og:title" content="CadPro — One image. One real CAD solid.">
+  <meta property="og:description" content="Trace one object image, set its real width and depth, and export validated STEP, STL, and GLB geometry.">
+  <meta property="og:image" content="__CADPRO_ORIGIN__/static/og-single-image.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="CadPro — Real geometry from a complete orbit">
-  <meta name="twitter:description" content="Turn 20–50 ordered photos or a complete turntable video into validated STEP, STL, and GLB geometry.">
-  <meta name="twitter:image" content="__CADPRO_ORIGIN__/static/og.png">
+  <meta name="twitter:title" content="CadPro — One image. One real CAD solid.">
+  <meta name="twitter:description" content="Trace one object image, set its real width and depth, and export validated STEP, STL, and GLB geometry.">
+  <meta name="twitter:image" content="__CADPRO_ORIGIN__/static/og-single-image.png">
   <title>CadPro — Reconstruction Studio</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
@@ -33,82 +33,71 @@
     <section class="intro">
       <div>
         <p class="eyebrow">RECONSTRUCTION STUDIO / 01</p>
-        <h1>Real geometry from<br><em>a complete orbit.</em></h1>
+        <h1>One clean image.<br><em>One real CAD solid.</em></h1>
       </div>
-      <p class="lede">Load every angle. Set one real measurement. CadPro intersects the visible profiles into a watertight model you can continue in Onshape, Blender, Fusion, or SolidWorks.</p>
+      <p class="lede">Upload one clear side view, set its real width and extrusion depth, and CadPro turns the visible profile into a watertight model for Onshape, Blender, Fusion, or SolidWorks.</p>
     </section>
 
     <section class="studio" aria-label="Reconstruction workspace">
       <aside class="step-rail" aria-label="Workflow progress">
         <ol>
-          <li class="active"><span>01</span><div><b>Capture</b><small>Add a full orbit</small></div></li>
-          <li><span>02</span><div><b>Calibrate</b><small>Set real scale</small></div></li>
-          <li><span>03</span><div><b>Reconstruct</b><small>Build the hull</small></div></li>
+          <li class="active"><span>01</span><div><b>Capture</b><small>Add one image</small></div></li>
+          <li><span>02</span><div><b>Calibrate</b><small>Set width + depth</small></div></li>
+          <li><span>03</span><div><b>Reconstruct</b><small>Extrude the profile</small></div></li>
           <li><span>04</span><div><b>Export</b><small>STEP + mesh</small></div></li>
         </ol>
         <div class="rail-note">
           <span class="note-index">A</span>
-          <p><b>One complete turn.</b> Keep the camera fixed and the object centered.</p>
+          <p><b>One clean side view.</b> Keep the entire object visible against a plain background.</p>
         </div>
       </aside>
 
       <div class="workbench">
-        <div class="mode-switch" role="tablist" aria-label="Input type">
-          <button class="mode-button active" type="button" data-mode="photos" role="tab" aria-selected="true">
+        <div class="mode-switch single-mode" aria-label="Input type">
+          <div class="mode-button active">
             <span class="mode-icon photo-icon" aria-hidden="true"></span>
-            <span><b>Photo orbit</b><small>20–50 ordered images</small></span>
-            <i>RECOMMENDED</i>
-          </button>
-          <button class="mode-button" type="button" data-mode="video" role="tab" aria-selected="false">
-            <span class="mode-icon video-icon" aria-hidden="true"></span>
-            <span><b>Turntable video</b><small>One constant-speed rotation</small></span>
-          </button>
+            <span><b>Single image</b><small>One clean side profile</small></span>
+            <i>ONLY INPUT</i>
+          </div>
         </div>
 
         <div class="work-card">
           <div class="card-heading">
-            <div><span class="section-number">01</span><h2 id="upload-title">Add your photo orbit</h2></div>
-            <span class="file-counter" id="file-counter">0 / 20 minimum</span>
+            <div><span class="section-number">01</span><h2 id="upload-title">Add one object image</h2></div>
+            <span class="file-counter" id="file-counter">0 / 1 image</span>
           </div>
 
           <label class="drop-zone" id="drop-zone" for="file-input">
-            <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" multiple>
+            <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/bmp">
             <span class="drop-glyph" aria-hidden="true"><i></i><i></i></span>
-            <strong id="drop-title">Drop 20–50 photos here</strong>
-            <small id="drop-copy">or browse files · keep them in rotation order</small>
-            <span class="browse-chip">CHOOSE FILES</span>
+            <strong id="drop-title">Drop one image here</strong>
+            <small id="drop-copy">or browse · PNG, JPEG, WebP, or BMP</small>
+            <span class="browse-chip">CHOOSE IMAGE</span>
           </label>
 
           <div class="selection" id="selection" hidden>
             <div class="selection-head">
-              <p><b id="selection-count">0 views loaded</b><span id="selection-size">0 MB</span></p>
-              <button type="button" id="clear-files">Clear all</button>
+              <p><b id="selection-count">No image loaded</b><span id="selection-size">0 MB</span></p>
+              <button type="button" id="clear-files">Remove</button>
             </div>
-            <div class="thumbnail-strip" id="thumbnail-strip" aria-label="Selected capture order"></div>
+            <div class="thumbnail-strip" id="thumbnail-strip" aria-label="Selected image"></div>
           </div>
 
           <div class="calibration-grid">
             <label class="field">
-              <span>Maximum object width <button class="tip" type="button" title="The largest real horizontal span visible anywhere in the full rotation.">?</button></span>
+              <span>Object width <button class="tip" type="button" title="Measure the real horizontal width represented by the detected outline.">?</button></span>
               <div class="measure-input"><input id="width-mm" type="number" min="0.001" step="0.1" value="100" inputmode="decimal"><b>mm</b></div>
             </label>
             <label class="field">
-              <span>Rotation direction</span>
-              <select id="rotation-direction">
-                <option value="counterclockwise">Counterclockwise</option>
-                <option value="clockwise">Clockwise</option>
-              </select>
-            </label>
-            <label class="field video-setting" hidden>
-              <span>Silhouette views</span>
-              <div class="range-row"><input id="view-count" type="range" min="20" max="50" value="24"><output id="view-output">24</output></div>
+              <span>Extrusion depth <button class="tip" type="button" title="Choose how far the visible profile should extend backward into a solid.">?</button></span>
+              <div class="measure-input"><input id="depth-mm" type="number" min="0.001" step="0.1" value="10" inputmode="decimal"><b>mm</b></div>
             </label>
           </div>
 
           <div class="quality-row" id="quality-row">
-            <div><span class="quality-dot waiting"></span><p><b>Capture count</b><small id="count-check">Add at least 20 photos</small></p></div>
-            <div><span class="quality-dot waiting"></span><p><b>Real scale</b><small id="scale-check">100 mm maximum width</small></p></div>
-            <div><span class="quality-dot waiting"></span><p><b>Input order</b><small>First to last around one turn</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b>Image</b><small id="image-check">Add one clear image</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b>Real width</b><small id="scale-check">100 mm profile width</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b>Solid depth</b><small id="depth-check">10 mm extrusion</small></p></div>
           </div>
 
           <div class="action-row">
@@ -124,13 +113,13 @@
           <div class="progress-orbit" aria-hidden="true"><span></span><i></i></div>
           <p class="eyebrow">GEOMETRY BUILD / LIVE</p>
           <h2 id="progress-title">Preparing your capture</h2>
-          <p id="progress-copy">Checking every view before reconstruction begins.</p>
+          <p id="progress-copy">Checking the image before reconstruction begins.</p>
           <div class="progress-track"><span id="progress-bar"></span></div>
           <div class="progress-meta"><span id="progress-stage">UPLOAD</span><b id="progress-value">5%</b></div>
           <ol class="build-stages">
-            <li class="active" data-stage="upload"><span>01</span>Secure inputs</li>
-            <li data-stage="segment"><span>02</span>Extract silhouettes</li>
-            <li data-stage="reconstruct"><span>03</span>Intersect geometry</li>
+            <li class="active" data-stage="upload"><span>01</span>Secure image</li>
+            <li data-stage="segment"><span>02</span>Extract profile</li>
+            <li data-stage="reconstruct"><span>03</span>Extrude solid</li>
             <li data-stage="export"><span>04</span>Validate + export</li>
           </ol>
         </div>
@@ -155,7 +144,7 @@
             <div><span>SIZE Z</span><b id="metric-z">—</b><small>mm</small></div>
             <div><span>VOLUME</span><b id="metric-volume">—</b><small>mm³</small></div>
             <div><span>FACES</span><b id="metric-faces">—</b><small>B-rep</small></div>
-            <div><span>VIEWS</span><b id="metric-views">—</b><small>used</small></div>
+            <div><span>IMAGE</span><b id="metric-views">—</b><small>used</small></div>
           </div>
           <div class="download-stack">
             <a class="download primary" id="download-step" href="#"><span><b>STEP</b><small>Onshape · Fusion · SolidWorks</small></span><i>DOWNLOAD →</i></a>
@@ -163,18 +152,18 @@
             <a class="download" id="download-glb" href="#"><span><b>GLB</b><small>Blender · web · real-time 3D</small></span><i>DOWNLOAD →</i></a>
             <a class="report-link" id="download-report" href="#">Download reconstruction report (.json)</a>
           </div>
-          <div class="truth-note"><span>!</span><p><b>Silhouette-derived geometry</b>This is a validated visual hull. Features never visible in an outline cannot be recovered from ordinary photos.</p></div>
+          <div class="truth-note"><span>!</span><p><b>Measured profile extrusion</b>The outline comes from your image; depth comes from the value you choose. A single image cannot reveal backside or hidden features.</p></div>
         </aside>
       </div>
     </section>
 
     <section class="capture-guide" id="capture-guide">
-      <div><p class="eyebrow">CAPTURE CONTRACT / 02</p><h2>The model is only as complete<br>as the orbit you give it.</h2></div>
+      <div><p class="eyebrow">CAPTURE CONTRACT / 02</p><h2>A cleaner outline makes<br>a cleaner CAD profile.</h2></div>
       <ol>
-        <li><span>01</span><p><b>Lock the camera</b>Use a tripod. No zoom, pan, or focus changes.</p></li>
-        <li><span>02</span><p><b>Center the axis</b>Rotate the object around the exact center of frame.</p></li>
-        <li><span>03</span><p><b>Light the outline</b>Use a plain background with clean edge contrast.</p></li>
-        <li><span>04</span><p><b>Complete 360°</b>Space photos evenly or film one steady revolution.</p></li>
+        <li><span>01</span><p><b>Shoot straight on</b>Keep the camera square to the face you want to trace.</p></li>
+        <li><span>02</span><p><b>Show the whole object</b>Leave clear space between the outline and every image edge.</p></li>
+        <li><span>03</span><p><b>Light the outline</b>Use a plain, contrasting background without connected shadows.</p></li>
+        <li><span>04</span><p><b>Measure before building</b>Enter the real profile width and the depth you want extruded.</p></li>
       </ol>
     </section>
   </main>

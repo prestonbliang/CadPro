@@ -3,14 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
+from collections.abc import Callable
 from typing import Literal, Sequence
 
 import cv2
 import numpy as np
 from OCP.TopoDS import TopoDS_Shape
 
-from cadpro.media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, Silhouette, extract_silhouette
-from cadpro.step import visual_hull_from_silhouettes
+from cadpro.media import (
+    IMAGE_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    Silhouette,
+    extract_silhouette,
+    validated_image_size,
+)
+from cadpro.step import solid_from_silhouette, visual_hull_from_silhouettes
 
 
 MIN_CAPTURE_VIEWS = 20
@@ -37,7 +44,7 @@ class Reconstruction:
 
     shape: TopoDS_Shape
     silhouettes: tuple[Silhouette, ...]
-    mode: Literal["photos", "video"]
+    mode: Literal["image", "photos", "video"]
     source_names: tuple[str, ...]
 
     @property
@@ -48,6 +55,59 @@ class Reconstruction:
                 zip(self.source_names, self.silhouettes, strict=True)
             )
         )
+
+
+def reconstruct_single_image(
+    path: str | Path,
+    width_mm: float,
+    depth_mm: float,
+    *,
+    on_profile_ready: Callable[[], None] | None = None,
+) -> Reconstruction:
+    """Extrude one image silhouette into a watertight prismatic CAD body."""
+    _validate_dimension(width_mm, label="width_mm")
+    _validate_dimension(depth_mm, label="depth_mm")
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Image does not exist: {source}")
+    if source.suffix.lower() not in IMAGE_EXTENSIONS:
+        supported = ", ".join(sorted(IMAGE_EXTENSIONS))
+        raise ValueError(
+            f"Unsupported image type '{source.suffix.lower()}'; "
+            f"supported image types: {supported}"
+        )
+    expected_size = validated_image_size(source)
+    image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise ValueError(f"OpenCV could not decode image: {source}")
+    actual_size = (int(image.shape[1]), int(image.shape[0]))
+    if actual_size != expected_size:
+        raise ValueError(
+            f"Decoded image dimensions changed while reading {source.name}; "
+            "use an ordinary, non-animated image"
+        )
+    try:
+        silhouette = extract_silhouette(image)
+    except ValueError as error:
+        raise ValueError(f"Could not extract the object from image ({source.name}): {error}") from error
+    _validate_silhouette(
+        silhouette,
+        expected_size=None,
+        source_label=f"image ({source.name})",
+    )
+    if on_profile_ready is not None:
+        on_profile_ready()
+    shape = solid_from_silhouette(
+        silhouette,
+        width_mm=width_mm,
+        depth_mm=depth_mm,
+    )
+    return Reconstruction(
+        shape=shape,
+        silhouettes=(silhouette,),
+        mode="image",
+        source_names=(source.name,),
+    )
 
 
 def reconstruct_photo_set(
@@ -78,9 +138,14 @@ def reconstruct_photo_set(
                 f"Photo {order + 1} has unsupported type '{source.suffix.lower()}'; "
                 f"supported image types: {supported}"
             )
+        expected_encoded_size = validated_image_size(source)
         image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
         if image is None:
             raise ValueError(f"OpenCV could not decode photo {order + 1}: {source}")
+        if (int(image.shape[1]), int(image.shape[0])) != expected_encoded_size:
+            raise ValueError(
+                f"Decoded image dimensions changed in photo {order + 1} ({source.name})"
+            )
         try:
             silhouette = extract_silhouette(image)
         except ValueError as error:
@@ -189,10 +254,14 @@ def reconstruct_turntable_video(
 
 
 def _validate_width(width_mm: float) -> None:
-    if isinstance(width_mm, bool) or not isinstance(width_mm, (int, float)):
-        raise ValueError("width_mm must be a finite positive number")
-    if not math.isfinite(float(width_mm)) or width_mm <= 0:
-        raise ValueError("width_mm must be a finite positive number")
+    _validate_dimension(width_mm, label="width_mm")
+
+
+def _validate_dimension(value: float, *, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a finite positive number")
+    if not math.isfinite(float(value)) or value <= 0:
+        raise ValueError(f"{label} must be a finite positive number")
 
 
 def _validate_view_count(view_count: int, *, label: str) -> None:

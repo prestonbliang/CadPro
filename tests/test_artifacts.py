@@ -22,8 +22,8 @@ def _reconstruction() -> Reconstruction:
     return Reconstruction(
         shape=BRepPrimAPI_MakeBox(gp_Pnt(100, 200, 300), 10, 20, 30).Shape(),
         silhouettes=(silhouette,),
-        mode="photos",
-        source_names=("view-00.png",),
+        mode="image",
+        source_names=("object.png",),
     )
 
 
@@ -73,13 +73,13 @@ def test_exports_valid_step_binary_stl_glb_preview_and_json(tmp_path):
     assert "data:text/javascript;base64," in preview
 
     report = json.loads(manifest.report_path.read_text(encoding="utf-8"))
-    assert report["reconstruction"] == {"mode": "photos", "input_count": 1}
+    assert report["reconstruction"] == {"mode": "image", "input_count": 1}
     assert report["geometry"]["dimensions_mm"] == {"x": 10.0, "y": 20.0, "z": 30.0}
     assert report["geometry"]["volume_mm3"] == pytest.approx(6000)
     assert report["geometry"]["solid_count"] == 1
     assert report["geometry"]["face_count"] == 6
     assert report["geometry"]["is_valid"] is True
-    assert report["inputs"][0]["source_name"] == "view-00.png"
+    assert report["inputs"][0]["source_name"] == "object.png"
     assert set(report["artifacts"]) == {"step", "stl", "glb", "preview", "report"}
     assert manifest.metrics.dimensions_mm == pytest.approx((10, 20, 30))
     assert manifest.preview_html == manifest.preview_path
@@ -105,6 +105,19 @@ def test_failed_staged_export_preserves_existing_artifacts(tmp_path, monkeypatch
 
     assert {path: path.read_bytes() for path in expected} == expected
     assert not any(path.is_dir() and path.name.startswith(".existing-") for path in tmp_path.iterdir())
+
+
+def test_image_artifact_export_requires_exactly_one_input(tmp_path):
+    reconstruction = _reconstruction()
+    invalid = Reconstruction(
+        shape=reconstruction.shape,
+        silhouettes=reconstruction.silhouettes * 2,
+        mode="image",
+        source_names=("front.png", "back.png"),
+    )
+
+    with pytest.raises(ValueError, match="exactly one silhouette"):
+        artifacts_module.export_artifacts(invalid, tmp_path)
 
 
 @pytest.mark.parametrize("stem", ["", "../escape", "has spaces", "<script>"])

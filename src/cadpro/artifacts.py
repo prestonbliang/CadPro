@@ -86,10 +86,12 @@ def export_artifacts(
             "stem must be 1-128 characters using only letters, digits, '.', '_' or '-', "
             "and must start with a letter or digit"
         )
-    if reconstruction.mode not in {"photos", "video"}:
+    if reconstruction.mode not in {"image", "photos", "video"}:
         raise ValueError(f"Unknown reconstruction mode: {reconstruction.mode!r}")
     if len(reconstruction.silhouettes) != len(reconstruction.source_names):
         raise ValueError("Reconstruction silhouettes and source_names must have equal lengths")
+    if reconstruction.mode == "image" and len(reconstruction.silhouettes) != 1:
+        raise ValueError("Image reconstruction must contain exactly one silhouette")
     if reconstruction.shape.IsNull():
         raise ValueError("Reconstruction contains no CAD shape")
     if not BRepCheck_Analyzer(reconstruction.shape).IsValid():

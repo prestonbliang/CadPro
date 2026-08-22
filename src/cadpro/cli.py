@@ -15,7 +15,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 @app.callback()
 def main() -> None:
-    """Convert pictures and videos into solid STEP CAD models."""
+    """Create measured STEP CAD models and compare CAD geometry."""
 
 
 @app.command()
@@ -77,7 +77,7 @@ def web(
     port: int = typer.Option(8000, min=1, max=65535, help="Website port."),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the website after launch."),
 ) -> None:
-    """Launch the CadPro reconstruction website."""
+    """Launch the single-image profile-extrusion website."""
     import uvicorn
 
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host

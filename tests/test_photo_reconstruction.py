@@ -1,4 +1,6 @@
 from pathlib import Path
+import struct
+import zlib
 
 import cv2
 import numpy as np
@@ -7,7 +9,19 @@ import pytest
 from cadpro import reconstruct as reconstruct_module
 
 
-def _write_view(path: Path, *, size: tuple[int, int] = (160, 120), border: bool = False) -> None:
+def _write_image(path: Path, *, border: bool = False) -> None:
+    image = np.full((120, 160, 3), 255, dtype=np.uint8)
+    left = 0 if border else 40
+    cv2.rectangle(image, (left, 30), (left + 80, 90), (0, 0, 0), -1)
+    assert cv2.imwrite(str(path), image)
+
+
+def _write_view(
+    path: Path,
+    *,
+    size: tuple[int, int] = (160, 120),
+    border: bool = False,
+) -> None:
     width, height = size
     image = np.full((height, width, 3), 255, dtype=np.uint8)
     left = 0 if border else width // 4
@@ -28,6 +42,112 @@ def _photo_set(directory: Path, count: int = 20) -> list[Path]:
         _write_view(path)
         paths.append(path)
     return paths
+
+
+def test_single_image_builds_extrusion_and_diagnostics(tmp_path, monkeypatch):
+    source = tmp_path / "object.png"
+    _write_image(source)
+    sentinel = object()
+    call = {}
+
+    def fake_solid(silhouette, width_mm, depth_mm):
+        call.update(silhouette=silhouette, width_mm=width_mm, depth_mm=depth_mm)
+        return sentinel
+
+    monkeypatch.setattr(reconstruct_module, "solid_from_silhouette", fake_solid)
+
+    events = []
+    result = reconstruct_module.reconstruct_single_image(
+        source,
+        80.0,
+        12.5,
+        on_profile_ready=lambda: events.append("profile"),
+    )
+
+    assert result.shape is sentinel
+    assert result.mode == "image"
+    assert result.source_names == ("object.png",)
+    assert len(result.silhouettes) == 1
+    assert call == {
+        "silhouette": result.silhouettes[0],
+        "width_mm": 80.0,
+        "depth_mm": 12.5,
+    }
+    assert len(result.input_diagnostics) == 1
+    assert result.input_diagnostics[0].order == 0
+    assert 0 < result.input_diagnostics[0].foreground_fraction < 1
+    assert events == ["profile"]
+
+
+@pytest.mark.parametrize(
+    ("width_mm", "depth_mm", "field"),
+    [
+        (0, 1, "width_mm"),
+        (1, 0, "depth_mm"),
+        (float("nan"), 1, "width_mm"),
+        (1, float("inf"), "depth_mm"),
+        (True, 1, "width_mm"),
+    ],
+)
+def test_single_image_requires_positive_finite_dimensions(
+    tmp_path, width_mm, depth_mm, field
+):
+    with pytest.raises(ValueError, match=field):
+        reconstruct_module.reconstruct_single_image(
+            tmp_path / "missing.png", width_mm, depth_mm
+        )
+
+
+def test_single_image_rejects_missing_file(tmp_path):
+    with pytest.raises(FileNotFoundError, match="Image does not exist"):
+        reconstruct_module.reconstruct_single_image(tmp_path / "missing.png", 80, 10)
+
+
+def test_single_image_rejects_wrong_type_before_decode(tmp_path):
+    source = tmp_path / "object.txt"
+    source.write_text("not an image", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported image type"):
+        reconstruct_module.reconstruct_single_image(source, 80, 10)
+
+
+def test_single_image_rejects_undecodable_image(tmp_path):
+    source = tmp_path / "object.png"
+    source.write_bytes(b"not really a png")
+
+    with pytest.raises(ValueError, match="could not be decoded"):
+        reconstruct_module.reconstruct_single_image(source, 80, 10)
+
+
+def test_single_image_rejects_oversized_dimensions_before_opencv_decode(tmp_path, monkeypatch):
+    source = tmp_path / "oversized.png"
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+    ihdr = struct.pack(">IIBBBBB", 50_000, 50_000, 8, 2, 0, 0, 0)
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b""))
+    called = False
+
+    def forbidden_decode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("OpenCV must not decode an oversized image")
+
+    monkeypatch.setattr(reconstruct_module.cv2, "imread", forbidden_decode)
+
+    with pytest.raises(ValueError, match="12,500,000 pixels"):
+        reconstruct_module.reconstruct_single_image(source, 80, 10)
+    assert called is False
+
+
+def test_single_image_rejects_border_touching_object(tmp_path):
+    source = tmp_path / "object.png"
+    _write_image(source, border=True)
+
+    with pytest.raises(ValueError, match="touches the image border"):
+        reconstruct_module.reconstruct_single_image(source, 80, 10)
 
 
 def test_photo_set_preserves_order_and_builds_diagnostics(tmp_path, monkeypatch):

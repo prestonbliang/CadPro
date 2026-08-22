@@ -1,127 +1,161 @@
+import json
 import time
 from html.parser import HTMLParser
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from cad_diff.step_io import load_step
 from cadpro.web import create_app
 
 
-class _IdCollector(HTMLParser):
+class _DocumentCollector(HTMLParser):
     def __init__(self):
         super().__init__()
         self.ids = []
+        self.elements = {}
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
-        if "id" in attributes:
-            self.ids.append(attributes["id"])
+        element_id = attributes.get("id")
+        if element_id:
+            self.ids.append(element_id)
+            self.elements[element_id] = (tag, attributes)
 
 
-def _photo_payload() -> bytes:
+def _image_payload() -> bytes:
     image = np.full((120, 160, 3), 255, dtype=np.uint8)
-    cv2.rectangle(image, (40, 20), (120, 100), (10, 10, 10), -1)
+    cv2.rectangle(image, (35, 20), (125, 100), (10, 10, 10), -1)
+    cv2.circle(image, (80, 60), 12, (255, 255, 255), -1)
     ok, encoded = cv2.imencode(".png", image)
     assert ok
     return encoded.tobytes()
 
 
-def _turntable_video_payload(path: Path) -> bytes:
-    writer = cv2.VideoWriter(
-        str(path),
-        cv2.VideoWriter_fourcc(*"MJPG"),
-        12,
-        (160, 120),
-    )
-    assert writer.isOpened()
-    for index in range(40):
-        frame = np.full((120, 160, 3), 255, dtype=np.uint8)
-        width = 80 - round(18 * abs(np.sin(2 * np.pi * index / 40)))
-        cv2.rectangle(frame, (80 - width // 2, 20), (80 + width // 2, 100), (10, 10, 10), -1)
-        writer.write(frame)
-    writer.release()
-    return path.read_bytes()
+def _wait_for_terminal(client: TestClient, status_url: str) -> dict:
+    deadline = time.monotonic() + 20
+    snapshot = {}
+    while time.monotonic() < deadline:
+        response = client.get(status_url)
+        assert response.status_code == 200
+        snapshot = response.json()
+        if snapshot["status"] in {"completed", "failed"}:
+            return snapshot
+        time.sleep(0.05)
+    raise AssertionError(f"single-image job did not finish: {snapshot}")
 
 
-def test_frontend_has_unique_interaction_targets_and_social_metadata(tmp_path, monkeypatch):
+def test_frontend_is_single_image_only_and_has_complete_social_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv("CADPRO_PUBLIC_ORIGIN", "https://cadpro.example")
     app = create_app(storage_parent=tmp_path)
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         response = client.get("/")
         health = client.get("/api/health")
+        script = client.get("/static/app.js")
+        social_card = client.get("/static/og-single-image.png")
+        retired_card = client.get("/static/og.png")
 
     assert response.status_code == 200
-    assert health.json()["version"] == "1.0.0"
-    assert "https://cadpro.example/static/og.png" in response.text
+    assert health.status_code == 200
+    assert health.json()["version"] == "1.1.0"
+    assert health.json()["capture_limits"]["images"] == {"minimum": 1, "maximum": 1}
+    assert health.json()["capture_limits"]["image_file"]["maximum_pixels"] == 12_500_000
+    assert "https://cadpro.example/static/og-single-image.png" in response.text
     assert "__CADPRO_ORIGIN__" not in response.text
-    collector = _IdCollector()
+    assert "/api/jobs/photos" not in response.text + script.text
+    assert "/api/jobs/video" not in response.text + script.text
+
+    collector = _DocumentCollector()
     collector.feed(response.text)
     assert len(collector.ids) == len(set(collector.ids))
-    assert {"file-input", "build-button", "progress-panel", "result-section"} <= set(collector.ids)
+    assert {"file-input", "width-mm", "depth-mm", "build-button", "result-section"} <= set(
+        collector.ids
+    )
+    tag, file_input = collector.elements["file-input"]
+    assert tag == "input"
+    assert file_input["type"] == "file"
+    assert "multiple" not in file_input
+    assert "video" not in file_input["accept"]
+
+    assert script.status_code == 200
+    assert social_card.status_code == 200
+    assert retired_card.status_code == 404
+    assert social_card.headers["content-type"].startswith("image/png")
+    card = cv2.imdecode(np.frombuffer(social_card.content, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert card is not None
+    assert card.shape[:2] == (1024, 1536)
 
 
-def test_frontend_bounds_uploads_and_sequential_photo_preview_memory():
-    script = (
-        Path(__file__).parents[1] / "src" / "cadpro" / "web_assets" / "app.js"
-    ).read_text(encoding="utf-8")
+def test_frontend_enforces_one_bounded_image_and_one_bounded_thumbnail():
+    assets = Path(__file__).parents[1] / "src" / "cadpro" / "web_assets"
+    script = (assets / "app.js").read_text(encoding="utf-8")
+    document = (assets / "index.html").read_text(encoding="utf-8")
 
     assert "MAX_IMAGE_BYTES = 25 * MEBIBYTE" in script
-    assert "MAX_PHOTO_SET_BYTES = 500 * MEBIBYTE" in script
-    assert "MAX_VIDEO_BYTES = 2 * GIBIBYTE" in script
-    assert "THUMBNAIL_MAX_EDGE = 192" in script
+    assert "THUMBNAIL_MAX_EDGE = 320" in script
+    assert "MAX_IMAGE_EDGE = 8_192" in script
+    assert "MAX_IMAGE_PIXELS = 12_500_000" in script
+    assert "incoming.length !== 1" in script
     assert "file.size > MAX_IMAGE_BYTES" in script
-    assert "totalBytes > MAX_PHOTO_SET_BYTES" in script
-    assert "incoming[0].size > MAX_VIDEO_BYTES" in script
-    assert "selectionGeneration" in script
+    assert "state.file = file" in script
+    assert "state.files" not in script
+    assert "syntheticProgress" not in script
     assert "new AbortController()" in script
-    assert "state.files = [...incoming]" in script
-    assert "for (let index = 0; index < files.length; index += 1)" in script
-    assert "await inspectPhoto(files[index], signal)" in script
-    assert "state.thumbnails.set(files[index], result.thumbnail)" in script
-    assert 'canvas.toDataURL("image/jpeg", 0.72)' in script
-    assert "Promise.all(state.files.map" not in script
-    assert "state.previewUrls" not in script
+    assert 'canvas.toDataURL("image/jpeg", 0.78)' in script
+    assert 'form.append("file", state.file, state.file.name)' in script
+    assert 'fetch("/api/jobs/image"' in script
+    assert "multiple" not in document
+    assert 'id="depth-mm"' in document
 
 
-def test_real_twenty_photo_job_exports_every_format(tmp_path):
+def test_real_single_image_job_exports_reloadable_measured_solid(tmp_path):
     app = create_app(storage_parent=tmp_path / "jobs", job_retention_seconds=60)
-    payload = _photo_payload()
-    uploads = [
-        ("files", (f"view-{index:02d}.png", payload, "image/png"))
-        for index in range(20)
-    ]
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         accepted = client.post(
-            "/api/jobs/photos",
-            files=uploads,
-            data={"width_mm": "40", "clockwise": "false"},
+            "/api/jobs/image",
+            files={"file": ("bracket.png", _image_payload(), "image/png")},
+            data={"width_mm": "45", "depth_mm": "7.5"},
         )
         assert accepted.status_code == 202, accepted.text
-        status_url = accepted.json()["status_url"]
+        assert accepted.json()["kind"] == "image"
+        assert accepted.json()["input_count"] == 1
+        assert accepted.json()["parameters"] == {"width_mm": 45.0, "depth_mm": 7.5}
 
-        deadline = time.monotonic() + 20
-        snapshot = accepted.json()
-        while snapshot["status"] not in {"completed", "failed"} and time.monotonic() < deadline:
-            time.sleep(0.05)
-            snapshot = client.get(status_url).json()
-
+        snapshot = _wait_for_terminal(client, accepted.json()["status_url"])
         assert snapshot["status"] == "completed", snapshot.get("error")
+        assert snapshot["stage"] == "complete"
         assert snapshot["progress"] == 100
-        assert snapshot["result"]["metrics"]["is_valid"] is True
-        artifacts = snapshot["result"]["artifacts"]
-        assert {artifact["filename"].split(".")[-1] for artifact in artifacts} >= {
-            "step",
-            "stl",
-            "glb",
-            "html",
-            "json",
-        }
+        assert snapshot["input_count"] == 1
 
+        result = snapshot["result"]
+        metrics = result["metrics"]
+        assert metrics["is_valid"] is True
+        assert metrics["solid_count"] == 1
+        assert metrics["dimensions_mm"] == pytest.approx([45.0, 40.0, 7.5], abs=0.02)
+        assert metrics["volume_mm3"] < 45.0 * 40.0 * 7.5
+        diagnostic = result["input_diagnostics"][0]
+        assert len(result["input_diagnostics"]) == 1
+        assert diagnostic["order"] == 0
+        assert diagnostic["source_name"] == "image.png"
+        assert diagnostic["source_size"] == [160, 120]
+        assert diagnostic["frame_index"] is None
+        assert 4 <= diagnostic["outline_points"] <= 256
+        assert diagnostic["hole_count"] == 1
+        assert 0 < diagnostic["foreground_fraction"] < 1
+
+        artifacts = result["artifacts"]
+        assert {artifact["filename"] for artifact in artifacts} == {
+            "cadpro-model.step",
+            "cadpro-model.stl",
+            "cadpro-model.glb",
+            "cadpro-model.preview.html",
+            "cadpro-model.report.json",
+        }
         for artifact in artifacts:
             download = client.get(artifact["download_url"])
             assert download.status_code == 200
@@ -131,40 +165,16 @@ def test_real_twenty_photo_job_exports_every_format(tmp_path):
                 assert disposition.startswith("inline;")
             else:
                 assert disposition.startswith("attachment;")
+
             if artifact["filename"].endswith(".step"):
                 step_path = tmp_path / "roundtrip.step"
                 step_path.write_bytes(download.content)
                 assert len(load_step(step_path)) == 1
-
-
-def test_real_turntable_video_job_exports_reloadable_step(tmp_path):
-    app = create_app(storage_parent=tmp_path / "jobs", job_retention_seconds=60)
-    payload = _turntable_video_payload(tmp_path / "orbit.avi")
-
-    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        accepted = client.post(
-            "/api/jobs/video",
-            files={"file": ("orbit.avi", payload, "video/x-msvideo")},
-            data={"width_mm": "55", "views": "20", "clockwise": "false"},
-        )
-        assert accepted.status_code == 202, accepted.text
-
-        deadline = time.monotonic() + 20
-        snapshot = accepted.json()
-        while snapshot["status"] not in {"completed", "failed"} and time.monotonic() < deadline:
-            time.sleep(0.05)
-            snapshot = client.get(snapshot["status_url"]).json()
-
-        assert snapshot["status"] == "completed", snapshot.get("error")
-        assert snapshot["input_count"] == 1
-        assert len(snapshot["result"]["input_diagnostics"]) == 20
-        step_artifact = next(
-            artifact
-            for artifact in snapshot["result"]["artifacts"]
-            if artifact["filename"].endswith(".step")
-        )
-        download = client.get(step_artifact["download_url"])
-        assert download.status_code == 200
-        step_path = tmp_path / "video-roundtrip.step"
-        step_path.write_bytes(download.content)
-        assert len(load_step(step_path)) == 1
+            if artifact["filename"].endswith(".report.json"):
+                report = json.loads(download.content)
+                assert report["reconstruction"] == {"mode": "image", "input_count": 1}
+                assert report["geometry"]["dimensions_mm"] == {
+                    "x": pytest.approx(45.0, abs=0.02),
+                    "y": pytest.approx(40.0, abs=0.02),
+                    "z": pytest.approx(7.5, abs=0.02),
+                }

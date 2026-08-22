@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import warnings
 
 import cv2
 import numpy as np
+from PIL import Image, UnidentifiedImageError
 
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 MIN_TURNTABLE_VIEWS = 4
 MAX_TURNTABLE_VIEWS = 24
+MAX_IMAGE_EDGE = 8_192
+MAX_IMAGE_PIXELS = 12_500_000
 
 
 @dataclass(frozen=True)
@@ -28,9 +32,11 @@ def silhouette_from_media(path: str | Path) -> Silhouette:
         raise FileNotFoundError(f"Input does not exist: {source}")
     suffix = source.suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
+        expected_size = validated_image_size(source)
         image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
         if image is None:
             raise ValueError(f"OpenCV could not decode image: {source}")
+        _require_matching_size(image, expected_size, source)
         return extract_silhouette(image)
     if suffix in VIDEO_EXTENSIONS:
         return _best_video_silhouette(source)
@@ -96,6 +102,7 @@ def extract_silhouette(image: np.ndarray, frame_index: int | None = None) -> Sil
     height, width = image.shape[:2]
     if min(height, width) < 8:
         raise ValueError("Image is too small; use at least 8 x 8 pixels")
+    _validate_image_size(width, height)
 
     mask = _foreground_mask(image)
     contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -117,6 +124,50 @@ def extract_silhouette(image: np.ndarray, frame_index: int | None = None) -> Sil
         if parents[i] == outer_index and abs(cv2.contourArea(contour)) >= image_area * 0.0001:
             holes.append(_simplify(contour, max(0.75, cv2.arcLength(contour, True) * 0.0015)))
     return Silhouette(outer=outer, holes=tuple(holes), source_size=(width, height), frame_index=frame_index)
+
+
+def validated_image_size(path: str | Path) -> tuple[int, int]:
+    """Read and bound encoded image dimensions without allocating the decoded pixels."""
+    source = Path(path)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                width, height = (int(value) for value in image.size)
+                _validate_image_size(width, height)
+                image.verify()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        raise ValueError(_image_limit_message()) from error
+    except (OSError, SyntaxError, UnidentifiedImageError) as error:
+        raise ValueError("Image file could not be decoded") from error
+    return width, height
+
+
+def _validate_image_size(width: int, height: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError("Image dimensions must be positive")
+    if width > MAX_IMAGE_EDGE or height > MAX_IMAGE_EDGE or width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(_image_limit_message())
+
+
+def _image_limit_message() -> str:
+    return (
+        f"Image may contain at most {MAX_IMAGE_PIXELS:,} pixels and be no more than "
+        f"{MAX_IMAGE_EDGE:,} pixels on either side"
+    )
+
+
+def _require_matching_size(
+    image: np.ndarray,
+    expected_size: tuple[int, int],
+    source: Path,
+) -> None:
+    actual_size = (int(image.shape[1]), int(image.shape[0]))
+    if actual_size != expected_size:
+        raise ValueError(
+            f"Decoded image dimensions changed while reading {source.name}; "
+            "use an ordinary, non-animated image"
+        )
 
 
 def _foreground_mask(image: np.ndarray) -> np.ndarray:

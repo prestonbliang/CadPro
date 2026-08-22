@@ -1,7 +1,7 @@
 [project]
 name = "cadpro"
-version = "1.0.0"
-description = "Turn complete photo or video orbits into validated STEP and mesh geometry."
+version = "1.1.0"
+description = "Turn one object image and measured dimensions into a validated 2.5D STEP solid."
 requires-python = ">=3.10"
 dependencies = [
     "cadquery-ocp-novtk",
@@ -13,6 +13,7 @@ dependencies = [
     "pygltflib",
     "jinja2",
     "opencv-python-headless>=4.10",
+    "Pillow>=10",
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",

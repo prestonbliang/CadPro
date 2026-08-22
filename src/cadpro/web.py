@@ -33,15 +33,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from cadpro import __version__
+from cadpro.media import MAX_IMAGE_EDGE, MAX_IMAGE_PIXELS, validated_image_size
 
 
-MIN_PHOTOS = 20
-MAX_PHOTOS = 50
-MIN_VIDEO_VIEWS = 20
-MAX_VIDEO_VIEWS = 50
 DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024
-DEFAULT_MAX_PHOTO_SET_BYTES = 500 * 1024 * 1024
-DEFAULT_MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_JOB_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_JOB_SWEEP_SECONDS = 60.0
 DEFAULT_MAX_PENDING_JOBS = 2
@@ -69,22 +64,6 @@ _IMAGE_CONTENT_TYPES = {
     "tiff": {"image/tiff"},
     "webp": {"image/webp"},
 }
-_VIDEO_SUFFIX_KIND = {
-    ".avi": "avi",
-    ".m4v": "iso-media",
-    ".mkv": "ebml",
-    ".mov": "iso-media",
-    ".mp4": "iso-media",
-    ".webm": "ebml",
-}
-_VIDEO_CONTENT_TYPES = {
-    ".avi": {"video/x-msvideo", "video/avi"},
-    ".m4v": {"video/x-m4v", "video/mp4"},
-    ".mkv": {"video/x-matroska", "video/mkv"},
-    ".mov": {"video/quicktime"},
-    ".mp4": {"video/mp4"},
-    ".webm": {"video/webm"},
-}
 _GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
 _ARTIFACT_SUFFIXES = {
     ".glb",
@@ -111,7 +90,6 @@ _STAGE_ORDER = {
     "complete": 5,
 }
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_UPLOAD_PATHS = {"/api/jobs/photos", "/api/jobs/video"}
 
 
 class ApiError(Exception):
@@ -144,7 +122,7 @@ class Artifact:
 @dataclass
 class Job:
     job_id: UUID
-    kind: Literal["photos", "video"]
+    kind: Literal["image"]
     root: Path
     input_dir: Path
     output_dir: Path
@@ -286,7 +264,7 @@ class JobManager:
         self,
         stage: StagedJob,
         *,
-        kind: Literal["photos", "video"],
+        kind: Literal["image"],
         input_paths: Sequence[Path],
         parameters: Mapping[str, Any],
     ) -> Job:
@@ -475,24 +453,15 @@ class JobManager:
 def _run_reconstruction(job: Job) -> object:
     """The one integration seam between the web queue and reconstruction engine."""
     from cadpro.artifacts import export_artifacts
-    from cadpro.reconstruct import reconstruct_photo_set, reconstruct_turntable_video
+    from cadpro.reconstruct import reconstruct_single_image
 
     job.advance("segment", 30)
-    if job.kind == "photos":
-        reconstruction = reconstruct_photo_set(
-            job.input_paths,
-            width_mm=job.parameters["width_mm"],
-            clockwise=job.parameters["clockwise"],
-        )
-    else:
-        reconstruction = reconstruct_turntable_video(
-            job.input_paths[0],
-            width_mm=job.parameters["width_mm"],
-            views=job.parameters["views"],
-            start_frame=job.parameters["start_frame"],
-            end_frame=job.parameters["end_frame"],
-            clockwise=job.parameters["clockwise"],
-        )
+    reconstruction = reconstruct_single_image(
+        job.input_paths[0],
+        width_mm=job.parameters["width_mm"],
+        depth_mm=job.parameters["depth_mm"],
+        on_profile_ready=lambda: job.advance("reconstruct", 65),
+    )
     job.advance("export", 85)
     return export_artifacts(reconstruction, job.output_dir, stem="cadpro-model")
 
@@ -506,16 +475,12 @@ class RequestGuardMiddleware:
         *,
         public_origin: str,
         trusted_hosts: Sequence[str],
-        photo_request_bytes: int,
-        video_request_bytes: int,
+        image_request_bytes: int,
     ) -> None:
         self.app = app
         self._public_origin = _canonical_origin(public_origin)
         self._trusted_hosts = frozenset(host.lower().rstrip(".") for host in trusted_hosts)
-        self._request_limits = {
-            "/api/jobs/photos": photo_request_bytes,
-            "/api/jobs/video": video_request_bytes,
-        }
+        self._request_limits = {"/api/jobs/image": image_request_bytes}
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -633,8 +598,6 @@ def create_app(
     asset_dir: str | Path | None = None,
     reconstruction_runner: ReconstructionRunner | None = None,
     max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
-    max_photo_set_bytes: int = DEFAULT_MAX_PHOTO_SET_BYTES,
-    max_video_bytes: int = DEFAULT_MAX_VIDEO_BYTES,
     job_retention_seconds: float = DEFAULT_JOB_TTL_SECONDS,
     job_sweep_interval_seconds: float = DEFAULT_JOB_SWEEP_SECONDS,
     max_pending_jobs: int = DEFAULT_MAX_PENDING_JOBS,
@@ -642,13 +605,8 @@ def create_app(
     trusted_hosts: Sequence[str] | None = None,
 ) -> FastAPI:
     """Build the application; injectable limits and runner keep API tests lightweight."""
-    for name, value in (
-        ("max_image_bytes", max_image_bytes),
-        ("max_photo_set_bytes", max_photo_set_bytes),
-        ("max_video_bytes", max_video_bytes),
-    ):
-        if value <= 0:
-            raise ValueError(f"{name} must be positive")
+    if max_image_bytes <= 0:
+        raise ValueError("max_image_bytes must be positive")
     if job_retention_seconds < 0:
         raise ValueError("job_retention_seconds cannot be negative")
     if job_sweep_interval_seconds <= 0:
@@ -662,10 +620,7 @@ def create_app(
     runner = reconstruction_runner or _run_reconstruction
     public_origin = _configured_public_origin()
     allowed_hosts = _configured_trusted_hosts(public_origin, trusted_hosts)
-    photo_request_bytes = min(
-        max_photo_set_bytes, max_image_bytes * MAX_PHOTOS
-    ) + request_overhead_bytes
-    video_request_bytes = max_video_bytes + request_overhead_bytes
+    image_request_bytes = max_image_bytes + request_overhead_bytes
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -684,8 +639,8 @@ def create_app(
 
     application = FastAPI(
         title="CadPro",
-        version="1.0.0",
-        description="Turn an ordered photo set or turntable video into downloadable CAD artifacts.",
+        version=__version__,
+        description="Turn one object image into downloadable CAD artifacts.",
         lifespan=lifespan,
     )
 
@@ -730,8 +685,7 @@ def create_app(
         RequestGuardMiddleware,
         public_origin=public_origin,
         trusted_hosts=allowed_hosts,
-        photo_request_bytes=photo_request_bytes,
-        video_request_bytes=video_request_bytes,
+        image_request_bytes=image_request_bytes,
     )
 
     @application.get("/", include_in_schema=False)
@@ -754,122 +708,73 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "capture_limits": {
-                "photos": {"minimum": MIN_PHOTOS, "maximum": MAX_PHOTOS},
-                "video_views": {"minimum": MIN_VIDEO_VIEWS, "maximum": MAX_VIDEO_VIEWS},
+                "images": {"minimum": 1, "maximum": 1},
+                "image_file": {
+                    "maximum_bytes": max_image_bytes,
+                    "maximum_pixels": MAX_IMAGE_PIXELS,
+                    "maximum_edge_pixels": MAX_IMAGE_EDGE,
+                },
+                "dimension_mm": {"maximum": MAX_WIDTH_MM},
             },
         }
 
-    @application.post("/api/jobs/photos", status_code=202)
-    async def create_photo_job(
+    @application.post("/api/jobs/image", status_code=202)
+    async def create_image_job(
         request: Request,
-        files: Annotated[
+        file: Annotated[
             list[UploadFile],
-            File(description="20 to 50 photos, repeated in rotation order."),
+            File(
+                description="Exactly one object image.",
+                json_schema_extra={"minItems": 1, "maxItems": 1},
+            ),
         ],
         width_mm: Annotated[
             float,
             Form(gt=0, le=MAX_WIDTH_MM, description="Known maximum object width in millimeters."),
         ],
-        clockwise: Annotated[
-            bool,
-            Form(description="Whether photo order rotates clockwise when viewed from above."),
-        ] = False,
-    ) -> JSONResponse:
-        if not MIN_PHOTOS <= len(files) <= MAX_PHOTOS:
-            await _close_uploads(files)
-            raise ApiError(
-                422,
-                "invalid_photo_count",
-                f"Upload between {MIN_PHOTOS} and {MAX_PHOTOS} photos in rotation order.",
-                details={"received": len(files), "minimum": MIN_PHOTOS, "maximum": MAX_PHOTOS},
-            )
-        _validate_width(width_mm)
-        manager = _manager(request)
-        try:
-            stage = manager.stage()
-        except Exception:
-            await _close_uploads(files)
-            raise
-        saved: list[Path] = []
-        total_bytes = 0
-        try:
-            for index, upload in enumerate(files, start=1):
-                suffix = _validated_upload_suffix(upload, media_kind="image", field=f"files[{index - 1}]")
-                destination = stage.input_dir / f"view-{index:03d}{suffix}"
-                size, header = await _save_upload(upload, destination, max_image_bytes)
-                _validate_file_signature(header, suffix, media_kind="image", field=f"files[{index - 1}]")
-                total_bytes += size
-                if total_bytes > max_photo_set_bytes:
-                    raise ApiError(
-                        413,
-                        "photo_set_too_large",
-                        f"The complete photo set may not exceed {_format_bytes(max_photo_set_bytes)}.",
-                        details={"maximum_bytes": max_photo_set_bytes},
-                    )
-                saved.append(destination)
-            job = manager.submit(
-                stage,
-                kind="photos",
-                input_paths=saved,
-                parameters={"width_mm": width_mm, "clockwise": clockwise},
-            )
-        except Exception:
-            manager.discard(stage)
-            raise
-        finally:
-            await _close_uploads(files)
-        return _accepted_job(manager.snapshot(job.job_id))
-
-    @application.post("/api/jobs/video", status_code=202)
-    async def create_video_job(
-        request: Request,
-        file: Annotated[UploadFile, File(description="One complete turntable video.")],
-        width_mm: Annotated[
+        depth_mm: Annotated[
             float,
-            Form(gt=0, le=MAX_WIDTH_MM, description="Known maximum object width in millimeters."),
+            Form(gt=0, le=MAX_WIDTH_MM, description="Desired extrusion depth in millimeters."),
         ],
-        views: Annotated[int, Form(ge=MIN_VIDEO_VIEWS, le=MAX_VIDEO_VIEWS)] = 24,
-        start_frame: Annotated[int, Form(ge=0)] = 0,
-        end_frame: Annotated[int | None, Form(ge=1)] = None,
-        clockwise: Annotated[bool, Form()] = False,
     ) -> JSONResponse:
-        _validate_width(width_mm)
-        if end_frame is not None and end_frame <= start_frame:
-            await file.close()
+        if len(file) != 1:
+            for upload in file:
+                await upload.close()
             raise ApiError(
                 422,
-                "invalid_frame_range",
-                "end_frame must be greater than start_frame.",
-                details={"start_frame": start_frame, "end_frame": end_frame},
+                "invalid_image_count",
+                "Upload exactly one image.",
+                details={"received": len(file), "minimum": 1, "maximum": 1},
             )
+        upload = file[0]
+        _validate_dimension(width_mm, field="width_mm")
+        _validate_dimension(depth_mm, field="depth_mm")
         manager = _manager(request)
         try:
             stage = manager.stage()
         except Exception:
-            await file.close()
+            await upload.close()
             raise
         try:
-            suffix = _validated_upload_suffix(file, media_kind="video", field="file")
-            destination = stage.input_dir / f"turntable{suffix}"
-            _size, header = await _save_upload(file, destination, max_video_bytes)
-            _validate_file_signature(header, suffix, media_kind="video", field="file")
+            suffix = _validated_upload_suffix(upload, field="file")
+            destination = stage.input_dir / f"image{suffix}"
+            _size, header = await _save_upload(upload, destination, max_image_bytes)
+            _validate_file_signature(header, suffix, field="file")
+            try:
+                await asyncio.to_thread(validated_image_size, destination)
+            except ValueError as error:
+                raise ApiError(422, "invalid_image", str(error)) from error
             job = manager.submit(
                 stage,
-                kind="video",
+                kind="image",
                 input_paths=[destination],
-                parameters={
-                    "width_mm": width_mm,
-                    "views": views,
-                    "start_frame": start_frame,
-                    "end_frame": end_frame,
-                    "clockwise": clockwise,
-                },
+                parameters={"width_mm": width_mm, "depth_mm": depth_mm},
             )
         except Exception:
             manager.discard(stage)
             raise
         finally:
-            await file.close()
+            await upload.close()
         return _accepted_job(manager.snapshot(job.job_id))
 
     @application.get("/api/jobs/{job_id}")
@@ -914,19 +819,18 @@ def _accepted_job(snapshot: Mapping[str, Any]) -> JSONResponse:
     )
 
 
-def _validate_width(width_mm: float) -> None:
-    if not math.isfinite(width_mm) or not 0 < width_mm <= MAX_WIDTH_MM:
+def _validate_dimension(value: float, *, field: str) -> None:
+    if not math.isfinite(value) or not 0 < value <= MAX_WIDTH_MM:
         raise ApiError(
             422,
-            "invalid_width",
-            f"width_mm must be a finite number greater than 0 and at most {MAX_WIDTH_MM:g}.",
+            f"invalid_{field.removesuffix('_mm')}",
+            f"{field} must be a finite number greater than 0 and at most {MAX_WIDTH_MM:g}.",
         )
 
 
 def _validated_upload_suffix(
     upload: UploadFile,
     *,
-    media_kind: Literal["image", "video"],
     field: str,
 ) -> str:
     filename = upload.filename or ""
@@ -934,21 +838,16 @@ def _validated_upload_suffix(
         raise ApiError(422, "invalid_filename", f"{field} must have a valid filename.")
     # Only the suffix is retained; path components and the user-controlled stem are discarded.
     suffix = Path(filename.replace("\\", "/").rsplit("/", 1)[-1]).suffix.lower()
-    allowed = _IMAGE_SUFFIX_KIND if media_kind == "image" else _VIDEO_SUFFIX_KIND
-    if suffix not in allowed:
-        supported = ", ".join(sorted(allowed))
+    if suffix not in _IMAGE_SUFFIX_KIND:
+        supported = ", ".join(sorted(_IMAGE_SUFFIX_KIND))
         raise ApiError(
             415,
-            f"unsupported_{media_kind}_type",
+            "unsupported_image_type",
             f"{field} must use one of these file extensions: {supported}.",
             details={"filename": _display_filename(filename)},
         )
     received_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
-    expected_types = (
-        _IMAGE_CONTENT_TYPES[_IMAGE_SUFFIX_KIND[suffix]]
-        if media_kind == "image"
-        else _VIDEO_CONTENT_TYPES[suffix]
-    )
+    expected_types = _IMAGE_CONTENT_TYPES[_IMAGE_SUFFIX_KIND[suffix]]
     if received_type not in expected_types | _GENERIC_CONTENT_TYPES:
         raise ApiError(
             415,
@@ -995,11 +894,10 @@ def _validate_file_signature(
     header: bytes,
     suffix: str,
     *,
-    media_kind: Literal["image", "video"],
     field: str,
 ) -> None:
-    expected = (_IMAGE_SUFFIX_KIND if media_kind == "image" else _VIDEO_SUFFIX_KIND)[suffix]
-    detected = _detect_image(header) if media_kind == "image" else _detect_video(header)
+    expected = _IMAGE_SUFFIX_KIND[suffix]
+    detected = _detect_image(header)
     if detected != expected:
         raise ApiError(
             415,
@@ -1020,21 +918,6 @@ def _detect_image(header: bytes) -> str | None:
     if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         return "webp"
     return None
-
-
-def _detect_video(header: bytes) -> str | None:
-    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"AVI ":
-        return "avi"
-    if len(header) >= 12 and header[4:8] == b"ftyp":
-        return "iso-media"
-    if header.startswith(b"\x1aE\xdf\xa3"):
-        return "ebml"
-    return None
-
-
-async def _close_uploads(uploads: Iterable[UploadFile]) -> None:
-    for upload in uploads:
-        await upload.close()
 
 
 def _register_artifacts(manifest: object, output_dir: Path) -> dict[str, Artifact]:

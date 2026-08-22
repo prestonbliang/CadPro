@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import base64
+import struct
 import threading
 import time
 from pathlib import Path
+import zlib
 
 from fastapi.testclient import TestClient
 
 from cadpro.web import create_app
 
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"test-image"
-MP4 = b"\x00\x00\x00\x18ftypisom" + b"test-video"
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _oversized_png() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+    ihdr = struct.pack(">IIBBBBB", 50_000, 50_000, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
 
 
 def _assets(tmp_path: Path) -> Path:
@@ -24,8 +37,10 @@ def _assets(tmp_path: Path) -> Path:
     return assets
 
 
-def _photo_files(count: int = 20, *, body: bytes = PNG, name: str = "photo.png"):
-    return [("files", (f"{index:02d}-{name}", body, "image/png")) for index in range(count)]
+def _image_file(
+    *, body: bytes = PNG, name: str = "object.png", content_type: str = "image/png"
+):
+    return {"file": (name, body, content_type)}
 
 
 def _wait_for_terminal(client: TestClient, job_id: str) -> dict:
@@ -63,7 +78,15 @@ def _artifact_runner(seen: list | None = None, outside: Path | None = None):
     return run
 
 
-def test_index_replaces_configured_origin_and_static_assets_are_served(tmp_path, monkeypatch):
+def _post_image(client: TestClient, *, width: str = "80", depth: str = "10", **kwargs):
+    return client.post(
+        "/api/jobs/image",
+        data={"width_mm": width, "depth_mm": depth},
+        files=_image_file(**kwargs),
+    )
+
+
+def test_index_health_and_routes_advertise_exactly_one_image(tmp_path, monkeypatch):
     assets = _assets(tmp_path)
     monkeypatch.setenv("CADPRO_PUBLIC_ORIGIN", "https://cad.example")
     app = create_app(
@@ -76,6 +99,9 @@ def test_index_replaces_configured_origin_and_static_assets_are_served(tmp_path,
         rejected = client.get("/", headers={"host": "attacker.invalid"})
         index = client.get("/", headers={"host": "cad.example"})
         static = client.get("/static/app.js")
+        health = client.get("/api/health")
+        old_photos = client.post("/api/jobs/photos")
+        old_video = client.post("/api/jobs/video")
 
     assert rejected.status_code == 400
     assert rejected.json()["error"]["code"] == "untrusted_host"
@@ -85,9 +111,31 @@ def test_index_replaces_configured_origin_and_static_assets_are_served(tmp_path,
     assert "attacker.invalid" not in index.text
     assert static.status_code == 200
     assert static.text == "window.cadpro = true;"
+    assert health.json()["capture_limits"]["images"] == {"minimum": 1, "maximum": 1}
+    assert health.json()["capture_limits"]["image_file"] == {
+        "maximum_bytes": 25 * 1024 * 1024,
+        "maximum_pixels": 12_500_000,
+        "maximum_edge_pixels": 8_192,
+    }
+    assert old_photos.status_code == 405
+    assert old_video.status_code == 405
+    post_routes = {
+        route.path
+        for route in app.routes
+        if "POST" in (getattr(route, "methods", None) or set())
+    }
+    assert post_routes == {"/api/jobs/image"}
+    openapi = app.openapi()
+    body_schema = openapi["paths"]["/api/jobs/image"]["post"]["requestBody"]["content"][
+        "multipart/form-data"
+    ]["schema"]
+    body_name = body_schema["$ref"].rsplit("/", 1)[-1]
+    file_schema = openapi["components"]["schemas"][body_name]["properties"]["file"]
+    assert file_schema["minItems"] == 1
+    assert file_schema["maxItems"] == 1
 
 
-def test_photo_job_preserves_order_uses_safe_names_and_downloads_registered_artifact(tmp_path):
+def test_image_job_uses_safe_name_dimensions_and_downloads_registered_artifact(tmp_path):
     seen = []
     storage = tmp_path / "storage"
     outside = tmp_path / "existing-secret.step"
@@ -99,10 +147,11 @@ def test_photo_job_preserves_order_uses_safe_names_and_downloads_registered_arti
     )
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        response = client.post(
-            "/api/jobs/photos",
-            data={"width_mm": "125.5", "clockwise": "true"},
-            files=_photo_files(name="..\\..\\part.png"),
+        response = _post_image(
+            client,
+            width="125.5",
+            depth="18.25",
+            name="..\\..\\part.png",
         )
         assert response.status_code == 202
         assert response.headers["location"] == response.json()["status_url"]
@@ -110,11 +159,12 @@ def test_photo_job_preserves_order_uses_safe_names_and_downloads_registered_arti
         assert job["status"] == "completed"
         assert job["stage"] == "complete"
         assert job["progress"] == 100
-        assert job["input_count"] == 20
-        assert job["parameters"] == {"width_mm": 125.5, "clockwise": True}
+        assert job["kind"] == "image"
+        assert job["input_count"] == 1
+        assert job["parameters"] == {"width_mm": 125.5, "depth_mm": 18.25}
         assert len(job["result"]["artifacts"]) == 1
         assert job["result"]["metrics"]["dimensions_mm"] == [10.0, 20.0, 30.0]
-        assert job["result"]["input_diagnostics"][0]["source_name"] == "view-001.png"
+        assert job["result"]["input_diagnostics"][0]["source_name"] == "image.png"
 
         artifact = job["result"]["artifacts"][0]
         download = client.get(artifact["download_url"])
@@ -125,9 +175,7 @@ def test_photo_job_preserves_order_uses_safe_names_and_downloads_registered_arti
         assert "attachment" in download.headers["content-disposition"]
         assert missing.status_code == 404
         assert outside.read_bytes() == b"do not expose"
-        assert [path.name for path in seen[0].input_paths] == [
-            f"view-{index:03d}.png" for index in range(1, 21)
-        ]
+        assert [path.name for path in seen[0].input_paths] == ["image.png"]
         session_root = app.state.job_manager.root
         assert session_root.is_dir()
 
@@ -136,7 +184,56 @@ def test_photo_job_preserves_order_uses_safe_names_and_downloads_registered_arti
     assert outside.exists()
 
 
-def test_photo_count_content_and_size_errors_are_actionable_and_clean_staging(tmp_path):
+def test_image_fields_are_required_positive_finite_and_bounded(tmp_path):
+    app = create_app(
+        storage_parent=tmp_path / "storage",
+        asset_dir=_assets(tmp_path),
+        reconstruction_runner=_artifact_runner(),
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        missing_depth = client.post(
+            "/api/jobs/image", data={"width_mm": "80"}, files=_image_file()
+        )
+        bad_width = _post_image(client, width="0")
+        bad_depth = _post_image(client, depth="nan")
+        huge_depth = _post_image(client, depth="1000001")
+
+    for response in (missing_depth, bad_width, bad_depth, huge_depth):
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_image_endpoint_rejects_more_than_one_file(tmp_path):
+    app = create_app(
+        storage_parent=tmp_path / "storage",
+        asset_dir=_assets(tmp_path),
+        reconstruction_runner=_artifact_runner(),
+    )
+
+    uploads = [
+        ("file", ("front.png", PNG, "image/png")),
+        ("file", ("back.png", PNG, "image/png")),
+    ]
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/api/jobs/image",
+            data={"width_mm": "80", "depth_mm": "10"},
+            files=uploads,
+        )
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "error": {
+                "code": "invalid_image_count",
+                "message": "Upload exactly one image.",
+                "details": {"received": 2, "minimum": 1, "maximum": 1},
+            }
+        }
+        assert list(app.state.job_manager.root.iterdir()) == []
+
+
+def test_image_content_type_signature_and_size_errors_clean_staging(tmp_path):
     storage = tmp_path / "storage"
     app = create_app(
         storage_parent=storage,
@@ -146,78 +243,29 @@ def test_photo_count_content_and_size_errors_are_actionable_and_clean_staging(tm
     )
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        too_few = client.post(
-            "/api/jobs/photos",
-            data={"width_mm": "80"},
-            files=_photo_files(19),
-        )
-        bad_magic = client.post(
-            "/api/jobs/photos",
-            data={"width_mm": "80"},
-            files=_photo_files(body=b"not a png"),
-        )
-        too_large = client.post(
-            "/api/jobs/photos",
-            data={"width_mm": "80"},
-            files=_photo_files(),
-        )
+        wrong_extension = _post_image(client, name="object.mp4", content_type="video/mp4")
+        wrong_type = _post_image(client, content_type="text/plain")
+        bad_magic = _post_image(client, body=b"not a png")
+        corrupt_image = _post_image(client, body=b"\x89PNG\r\n\x1a\ncorrupt")
+        oversized_image = _post_image(client, body=_oversized_png())
+        too_large = _post_image(client)
 
-        assert too_few.status_code == 422
-        assert too_few.json()["error"]["code"] == "invalid_photo_count"
-        # The invalid body is below the size limit and reaches signature validation.
+        assert wrong_extension.status_code == 415
+        assert wrong_extension.json()["error"]["code"] == "unsupported_image_type"
+        assert wrong_type.status_code == 415
+        assert wrong_type.json()["error"]["code"] == "content_type_mismatch"
         assert bad_magic.status_code == 415
         assert bad_magic.json()["error"]["code"] == "file_signature_mismatch"
+        assert corrupt_image.status_code == 422
+        assert corrupt_image.json()["error"]["code"] == "invalid_image"
+        assert str(app.state.job_manager.root) not in corrupt_image.text
+        assert "storage" not in corrupt_image.json()["error"]["message"].lower()
+        assert oversized_image.status_code == 422
+        assert oversized_image.json()["error"]["code"] == "invalid_image"
+        assert "12,500,000 pixels" in oversized_image.json()["error"]["message"]
         assert too_large.status_code == 413
         assert too_large.json()["error"]["code"] == "file_too_large"
         assert list(app.state.job_manager.root.iterdir()) == []
-
-
-def test_video_job_validates_fields_and_passes_safe_path_and_parameters(tmp_path):
-    seen = []
-    app = create_app(
-        storage_parent=tmp_path / "storage",
-        asset_dir=_assets(tmp_path),
-        reconstruction_runner=_artifact_runner(seen),
-    )
-
-    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        invalid_range = client.post(
-            "/api/jobs/video",
-            data={"width_mm": "90", "views": "24", "start_frame": "10", "end_frame": "10"},
-            files={"file": ("clip.mp4", MP4, "video/mp4")},
-        )
-        invalid_views = client.post(
-            "/api/jobs/video",
-            data={"width_mm": "90", "views": "8"},
-            files={"file": ("clip.mp4", MP4, "video/mp4")},
-        )
-        accepted = client.post(
-            "/api/jobs/video",
-            data={
-                "width_mm": "90",
-                "views": "30",
-                "start_frame": "5",
-                "end_frame": "105",
-                "clockwise": "true",
-            },
-            files={"file": ("..\\..\\private.mp4", MP4, "video/mp4")},
-        )
-        job = _wait_for_terminal(client, accepted.json()["id"])
-
-    assert invalid_range.status_code == 422
-    assert invalid_range.json()["error"]["code"] == "invalid_frame_range"
-    assert invalid_views.status_code == 422
-    assert invalid_views.json()["error"]["code"] == "invalid_request"
-    assert accepted.status_code == 202
-    assert job["status"] == "completed"
-    assert seen[0].input_paths[0].name == "turntable.mp4"
-    assert seen[0].parameters == {
-        "width_mm": 90.0,
-        "views": 30,
-        "start_frame": 5,
-        "end_frame": 105,
-        "clockwise": True,
-    }
 
 
 def test_jobs_run_one_at_a_time_and_failures_reach_terminal_state(tmp_path):
@@ -233,7 +281,7 @@ def test_jobs_run_one_at_a_time_and_failures_reach_terminal_state(tmp_path):
         try:
             time.sleep(0.02)
             if job.parameters["width_mm"] == 2:
-                raise ValueError("No consistent foreground was found; retake the capture.")
+                raise ValueError("No consistent foreground was found; retake the image.")
             output = job.output_dir / "model.step"
             output.write_bytes(b"STEP")
             return output
@@ -247,12 +295,8 @@ def test_jobs_run_one_at_a_time_and_failures_reach_terminal_state(tmp_path):
         reconstruction_runner=runner,
     )
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        first = client.post(
-            "/api/jobs/photos", data={"width_mm": "1"}, files=_photo_files()
-        ).json()
-        second = client.post(
-            "/api/jobs/photos", data={"width_mm": "2"}, files=_photo_files()
-        ).json()
+        first = _post_image(client, width="1").json()
+        second = _post_image(client, width="2").json()
         first_result = _wait_for_terminal(client, first["id"])
         second_result = _wait_for_terminal(client, second["id"])
 
@@ -261,7 +305,7 @@ def test_jobs_run_one_at_a_time_and_failures_reach_terminal_state(tmp_path):
     assert second_result["status"] == "failed"
     assert second_result["error"] == {
         "code": "reconstruction_failed",
-        "message": "No consistent foreground was found; retake the capture.",
+        "message": "No consistent foreground was found; retake the image.",
     }
 
 
@@ -290,22 +334,22 @@ def test_uploads_reject_cross_origin_requests_and_allow_same_loopback_origin(tmp
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         hostile = client.post(
-            "/api/jobs/photos",
+            "/api/jobs/image",
             headers={"origin": "https://attacker.invalid"},
-            data={"width_mm": "80"},
-            files=_photo_files(),
+            data={"width_mm": "80", "depth_mm": "10"},
+            files=_image_file(),
         )
         browser_cross_site = client.post(
-            "/api/jobs/photos",
+            "/api/jobs/image",
             headers={"sec-fetch-site": "cross-site"},
-            data={"width_mm": "80"},
-            files=_photo_files(),
+            data={"width_mm": "80", "depth_mm": "10"},
+            files=_image_file(),
         )
         accepted = client.post(
-            "/api/jobs/photos",
+            "/api/jobs/image",
             headers={"origin": "http://127.0.0.1:8000"},
-            data={"width_mm": "80"},
-            files=_photo_files(),
+            data={"width_mm": "80", "depth_mm": "10"},
+            files=_image_file(),
         )
 
         assert hostile.status_code == 403
@@ -321,14 +365,14 @@ def test_request_limit_rejects_declared_and_chunked_bodies_before_multipart_pars
         storage_parent=tmp_path / "storage",
         asset_dir=_assets(tmp_path),
         reconstruction_runner=_artifact_runner(),
-        max_video_bytes=32,
+        max_image_bytes=32,
         request_overhead_bytes=8,
     )
 
     multipart = (
-        b'--cadpro\r\nContent-Disposition: form-data; name="file"; filename="clip.mp4"\r\n'
-        b"Content-Type: video/mp4\r\n\r\n"
-        + MP4
+        b'--cadpro\r\nContent-Disposition: form-data; name="file"; filename="object.png"\r\n'
+        b"Content-Type: image/png\r\n\r\n"
+        + PNG
         + b"x" * 64
         + b"\r\n--cadpro--\r\n"
     )
@@ -339,12 +383,12 @@ def test_request_limit_rejects_declared_and_chunked_bodies_before_multipart_pars
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         declared = client.post(
-            "/api/jobs/video",
+            "/api/jobs/image",
             content=b"x" * 41,
             headers={"content-type": "multipart/form-data; boundary=cadpro"},
         )
         chunked = client.post(
-            "/api/jobs/video",
+            "/api/jobs/image",
             content=chunks(),
             headers={"content-type": "multipart/form-data; boundary=cadpro"},
         )
@@ -374,17 +418,11 @@ def test_queue_admission_is_bounded_while_one_job_runs(tmp_path):
     )
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         try:
-            first = client.post(
-                "/api/jobs/photos", data={"width_mm": "1"}, files=_photo_files()
-            )
+            first = _post_image(client, width="1")
             assert first.status_code == 202
             assert started.wait(timeout=2)
-            second = client.post(
-                "/api/jobs/photos", data={"width_mm": "2"}, files=_photo_files()
-            )
-            rejected = client.post(
-                "/api/jobs/photos", data={"width_mm": "3"}, files=_photo_files()
-            )
+            second = _post_image(client, width="2")
+            rejected = _post_image(client, width="3")
 
             assert second.status_code == 202
             assert rejected.status_code == 503
@@ -417,9 +455,7 @@ def test_concurrent_progress_updates_cannot_regress_stage_or_percentage(tmp_path
             time.sleep(delay)
             job.advance(stage, progress)
 
-        threads = [
-            threading.Thread(target=advance, args=item) for item in updates
-        ]
+        threads = [threading.Thread(target=advance, args=item) for item in updates]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -440,9 +476,7 @@ def test_concurrent_progress_updates_cannot_regress_stage_or_percentage(tmp_path
     )
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         try:
-            accepted = client.post(
-                "/api/jobs/photos", data={"width_mm": "80"}, files=_photo_files()
-            )
+            accepted = _post_image(client)
             assert accepted.status_code == 202
             assert updated.wait(timeout=2)
             in_progress = client.get(accepted.json()["status_url"]).json()
@@ -466,9 +500,7 @@ def test_expired_job_is_swept_while_service_is_idle(tmp_path):
         job_sweep_interval_seconds=0.01,
     )
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        accepted = client.post(
-            "/api/jobs/photos", data={"width_mm": "80"}, files=_photo_files()
-        )
+        accepted = _post_image(client)
         completed = _wait_for_terminal(client, accepted.json()["id"])
         job_root = app.state.job_manager.root / completed["id"]
         assert job_root.is_dir()

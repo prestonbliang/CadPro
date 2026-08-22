@@ -35,6 +35,14 @@ def test_convert_command_writes_step(tmp_path):
     assert "60 x 3 mm" in result.output
 
 
+def test_web_help_describes_the_single_image_workflow():
+    result = CliRunner().invoke(app, ["web", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "single-image profile-extrusion website" in result.output
+    assert "photo/video" not in result.output.lower()
+
+
 def test_convert_command_reports_unsupported_media(tmp_path):
     source = tmp_path / "notes.txt"
     source.write_text("not an image", encoding="utf-8")
