@@ -1,6 +1,6 @@
 [project]
 name = "cadpro"
-version = "0.1.0"
+version = "0.2.0"
 description = "Convert image and video silhouettes into editable, solid STEP geometry."
 requires-python = ">=3.10"
 dependencies = [

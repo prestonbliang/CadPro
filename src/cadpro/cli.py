@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from cadpro.pipeline import convert_media
+from cadpro.pipeline import convert_media, convert_turntable_video
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -31,6 +31,40 @@ def convert(
     typer.echo(
         f"Created {result.output} from {source}: {result.outline_points} outline points, "
         f"{result.holes} hole(s), {width_mm:g} x {depth_mm:g} mm"
+    )
+
+
+@app.command()
+def turntable(
+    input_path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="One full turntable video."),
+    width_mm: float = typer.Option(..., min=0.001, help="Real maximum horizontal span over the full rotation."),
+    output: Path = typer.Option(Path("model.step"), "--output", "-o", help="Destination STEP file."),
+    views: int = typer.Option(8, min=4, max=24, help="Evenly spaced silhouettes used for reconstruction."),
+    start_frame: int = typer.Option(0, min=0, help="First frame of the complete revolution."),
+    end_frame: int | None = typer.Option(None, min=1, help="Frame after the complete revolution."),
+    clockwise: bool = typer.Option(
+        False,
+        "--clockwise/--counterclockwise",
+        help="Rotation direction as viewed from above.",
+    ),
+) -> None:
+    """Reconstruct a solid visual hull from one 360-degree turntable video."""
+    try:
+        result = convert_turntable_video(
+            input_path,
+            output,
+            width_mm=width_mm,
+            views=views,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            clockwise=clockwise,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as error:
+        raise typer.BadParameter(str(error)) from error
+    frames = ", ".join(str(index) for index in result.sampled_frames)
+    typer.echo(
+        f"Created {result.output} from {len(result.sampled_frames)} turntable views "
+        f"(frames {frames}), scaled to {width_mm:g} mm maximum width"
     )
 
 

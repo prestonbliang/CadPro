@@ -2,10 +2,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
+from OCP.IFSelect import IFSelect_RetDone, IFSelect_RetFail
 
 from cad_diff.step_io import load_step
 from cadpro.media import extract_silhouette
 from cadpro.pipeline import convert_media
+from cadpro import step as step_module
 
 
 def _part_image(path: Path) -> None:
@@ -49,3 +52,31 @@ def test_converts_video_using_a_selected_frame(tmp_path):
 
     assert result.selected_frame is not None
     assert len(load_step(output)) == 1
+
+
+def test_failed_step_write_preserves_existing_destination(tmp_path, monkeypatch):
+    class FailingWriter:
+        def Transfer(self, shape, mode):
+            return IFSelect_RetDone
+
+        def Write(self, path):
+            return IFSelect_RetFail
+
+    output = tmp_path / "existing.step"
+    output.write_text("original STEP", encoding="utf-8")
+    monkeypatch.setattr(step_module, "STEPControl_Writer", FailingWriter)
+
+    with pytest.raises(RuntimeError, match="Could not write STEP"):
+        step_module.write_step(object(), output)
+
+    assert output.read_text(encoding="utf-8") == "original STEP"
+    assert list(tmp_path.iterdir()) == [output]
+
+
+def test_step_writer_rejects_non_step_destination(tmp_path):
+    output = tmp_path / "accidental-video.mp4"
+
+    with pytest.raises(ValueError, match=r"\.step or \.stp"):
+        step_module.write_step(object(), output)
+
+    assert not output.exists()

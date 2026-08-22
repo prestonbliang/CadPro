@@ -9,6 +9,8 @@ import numpy as np
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
+MIN_TURNTABLE_VIEWS = 4
+MAX_TURNTABLE_VIEWS = 24
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,57 @@ def silhouette_from_media(path: str | Path) -> Silhouette:
         return _best_video_silhouette(source)
     supported = ", ".join(sorted(IMAGE_EXTENSIONS | VIDEO_EXTENSIONS))
     raise ValueError(f"Unsupported media type '{suffix}'. Supported: {supported}")
+
+
+def silhouettes_from_turntable_video(
+    path: str | Path,
+    view_count: int = 8,
+    start_frame: int = 0,
+    end_frame: int | None = None,
+) -> tuple[Silhouette, ...]:
+    """Sample evenly spaced silhouettes from one complete turntable revolution."""
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Input does not exist: {source}")
+    if source.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError("Turntable reconstruction requires a supported video file")
+    if not MIN_TURNTABLE_VIEWS <= view_count <= MAX_TURNTABLE_VIEWS:
+        raise ValueError(
+            f"view_count must be between {MIN_TURNTABLE_VIEWS} and {MAX_TURNTABLE_VIEWS}"
+        )
+
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise ValueError(f"OpenCV could not decode video: {source}")
+    try:
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_count <= 0:
+            raise ValueError("Video does not report a frame count; turntable sampling is unavailable")
+        stop = frame_count if end_frame is None else end_frame
+        if start_frame < 0 or stop > frame_count or stop <= start_frame:
+            raise ValueError(f"Frame range must satisfy 0 <= start < end <= {frame_count}")
+        if stop - start_frame < view_count:
+            raise ValueError("Selected frame range is shorter than the requested view count")
+
+        indices = np.linspace(start_frame, stop, view_count, endpoint=False, dtype=int)
+        silhouettes = []
+        for index in indices:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+            ok, frame = capture.read()
+            if not ok:
+                raise ValueError(f"Could not decode sampled video frame {index}")
+            try:
+                silhouette = extract_silhouette(frame, frame_index=int(index))
+            except ValueError as error:
+                raise ValueError(f"Could not extract the object at video frame {index}: {error}") from error
+            if _touches_border(silhouette):
+                raise ValueError(
+                    f"Object touches the image border at video frame {index}; keep the full object in view"
+                )
+            silhouettes.append(silhouette)
+        return tuple(silhouettes)
+    finally:
+        capture.release()
 
 
 def extract_silhouette(image: np.ndarray, frame_index: int | None = None) -> Silhouette:
@@ -92,11 +145,26 @@ def _clean_mask(mask: np.ndarray) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
-def _simplify(contour: np.ndarray, epsilon: float) -> np.ndarray:
+def _simplify(contour: np.ndarray, epsilon: float, max_points: int = 256) -> np.ndarray:
     points = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2).astype(np.float64)
+    while len(points) > max_points:
+        epsilon *= 1.35
+        points = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2).astype(np.float64)
     if len(points) < 3:
         raise ValueError("Object outline does not contain enough usable points")
     return points
+
+
+def _touches_border(silhouette: Silhouette, margin: int = 2) -> bool:
+    width, height = silhouette.source_size
+    minimum = silhouette.outer.min(axis=0)
+    maximum = silhouette.outer.max(axis=0)
+    return bool(
+        minimum[0] <= margin
+        or minimum[1] <= margin
+        or maximum[0] >= width - 1 - margin
+        or maximum[1] >= height - 1 - margin
+    )
 
 
 def _best_video_silhouette(path: Path, sample_count: int = 24) -> Silhouette:

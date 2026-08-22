@@ -1,28 +1,28 @@
 # CadPro
 
-CadPro converts a picture or video of a flat mechanical part into a real, solid STEP file.
-It detects the object's outside profile and visible through-holes, scales that profile to a
-real-world width, builds a watertight OpenCascade B-rep, and extrudes it to the requested
-depth. The resulting `.step` file opens in normal CAD software such as FreeCAD, Fusion,
-SolidWorks, and Onshape.
+CadPro converts pictures and videos into real, solid STEP geometry. It extracts object
+silhouettes, builds watertight OpenCascade B-reps, validates them, and writes ordinary
+`.step` files that open in FreeCAD, Fusion, SolidWorks, Onshape, and other CAD tools.
 
-This repository previously contained only `cad-diff`, a tool for comparing existing STEP
-files. That command is still included for compatibility, but `cadpro` is now the main tool.
+The repository previously contained only `cad-diff`, a tool for comparing existing STEP
+files. That command remains available for compatibility, while `cadpro` is the main tool.
 
-## What works now
+## Status: Phase 2 — multi-view turntable reconstruction
 
-- PNG, JPEG, WebP, BMP, and TIFF images
-- MP4, MOV, AVI, MKV, M4V, and WebM videos
-- Automatic background/foreground separation
-- Transparent PNG input
-- Outside contours and visible through-holes
-- User-controlled part width and extrusion depth in millimeters
-- Validity checking before export
-- A true STEP solid, not an STL/triangle mesh with a different extension
+CadPro now has two reconstruction paths:
 
-For video, CadPro samples the clip and uses the sharpest frame with a clean detectable
-silhouette. Put the part on a plain, contrasting background and film it approximately
-straight-on.
+- `cadpro convert` turns one image—or the clearest frame in a video—into a scaled,
+  constant-thickness solid. It preserves the outside profile and visible through-holes.
+- `cadpro turntable` samples one complete 360° video and intersects the silhouettes'
+  viewing volumes into a solid visual hull. This recovers shape changes around the object
+  instead of merely extruding one frame.
+
+Both paths produce boundary-representation STEP solids, not an STL/triangle mesh renamed
+to `.step`. Output replacement is atomic, so a failed conversion does not destroy an
+existing destination file.
+
+Supported images: PNG, JPEG, WebP, BMP, and TIFF. Supported videos: MP4, MOV, AVI, MKV,
+M4V, and WebM.
 
 ## Install
 
@@ -42,40 +42,71 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
-## Convert an image
+## Profile extrusion from an image
 
 ```powershell
-.venv\Scripts\cadpro.exe convert bracket.png --width-mm 120 --depth-mm 8 --output bracket.step
+.venv\Scripts\cadpro.exe convert bracket.png --width-mm 120 --depth-mm 8 -o bracket.step
 ```
 
-The detected outline will be scaled to 120 mm wide and extruded 8 mm deep. If the size
-flags are omitted, CadPro uses a 100 mm width and 10 mm depth.
+The detected outline is scaled to 120 mm wide and extruded 8 mm deep. Without those
+options, `convert` uses a 100 mm width and 10 mm depth. Transparent PNGs are supported;
+otherwise CadPro estimates the background from the image border.
 
-## Convert a video
+The same command accepts a normal video and automatically uses its clearest detectable
+frame:
 
 ```powershell
-.venv\Scripts\cadpro.exe convert turntable.mp4 --width-mm 75 --depth-mm 4 -o plate.step
+.venv\Scripts\cadpro.exe convert inspection.mp4 --width-mm 75 --depth-mm 4 -o plate.step
 ```
 
-The command prints the selected frame, outline point count, and number of holes when the
-conversion succeeds.
+This mode is best for flat plates, brackets, gaskets, signs, and other parts with a
+constant thickness.
 
-## Getting a good result
+## 3D visual hull from a turntable video
 
-1. Place the part on a plain background with strong color/brightness contrast.
-2. Keep the camera perpendicular to the face of the part to avoid perspective distortion.
-3. Make sure the entire outline is visible and evenly lit.
-4. Supply one known physical dimension with `--width-mm`.
-5. Use `--depth-mm` for the part's measured thickness.
+Record one complete, constant-speed revolution and run:
 
-## Important limitation
+```powershell
+.venv\Scripts\cadpro.exe turntable part.mp4 --width-mm 75 --views 12 -o part.step
+```
 
-A single ordinary photo does not contain the hidden dimensions needed to reconstruct an
-arbitrary 3D object. This first version intentionally solves the useful, verifiable case:
-flat or constant-thickness parts that can be represented by extruding a photographed
-profile. It does not invent unseen back-side features, infer stepped depths, or perform
-multi-view photogrammetry. Those require calibrated multi-view reconstruction plus feature
-recognition and are future work.
+Here, `--width-mm` means the real maximum horizontal span visible anywhere in the complete
+rotation. CadPro uses one consistent pixel-to-millimeter scale across every view.
+
+If the useful revolution occupies only part of a longer recording, provide an inclusive
+start frame and exclusive end frame:
+
+```powershell
+.venv\Scripts\cadpro.exe turntable raw.mp4 --width-mm 75 --views 12 `
+  --start-frame 40 --end-frame 280 --clockwise -o part.step
+```
+
+Rotation direction is viewed from above. The default is `--counterclockwise`; choosing the
+wrong direction mirrors asymmetric geometry. More views capture the silhouette more
+closely but create more faces and take longer. The supported range is 4–24, with 8 as the
+default.
+
+### Turntable capture checklist
+
+1. Trim or select exactly one 360° revolution at roughly constant speed.
+2. Keep the camera fixed and level—no panning, zooming, or autofocus breathing.
+3. Aim the camera at the vertical rotation axis and keep that axis at frame center.
+4. Use a distant or zoomed camera for an approximately orthographic view.
+5. Keep the entire object visible in every sampled frame; border contact is rejected.
+6. Use a plain, contrasting background with no platform or shadow merged into the object.
+7. Keep the object rigidly fixed to the rotation axis.
+
+## Honest limitations
+
+A visual hull reconstructs only geometry that changes an object's silhouettes. It cannot
+recover concavities that are never visible in an outline, internal cavities, top-only
+holes, texture, material, or exact analytic features such as an inferred cylinder radius.
+Perspective, camera movement, turntable wobble, reflections, transparency, motion blur,
+and very thin features reduce accuracy. The result is real CAD geometry, but it is a
+silhouette-derived approximation rather than a native parametric feature tree.
+
+A single image contains even less depth information, so `convert` intentionally limits
+that case to a measured profile extrusion instead of inventing hidden geometry.
 
 ## Development
 
@@ -86,13 +117,13 @@ recognition and are future work.
 Core modules:
 
 ```text
-src/cadpro/media.py     image/video decoding, segmentation, contour extraction
-src/cadpro/step.py      contour-to-B-rep construction, validation, STEP export
-src/cadpro/pipeline.py  conversion API
-src/cadpro/cli.py       command-line interface
+src/cadpro/media.py     decoding, segmentation, contour extraction, frame sampling
+src/cadpro/step.py      profile solids, visual hull, validation, atomic STEP export
+src/cadpro/pipeline.py  profile and turntable conversion APIs
+src/cadpro/cli.py       convert and turntable commands
 ```
 
-The earlier semantic STEP comparison command remains available as:
+The earlier semantic STEP comparison command remains available:
 
 ```powershell
 .venv\Scripts\cad-diff.exe old.step new.step --html diff.html
