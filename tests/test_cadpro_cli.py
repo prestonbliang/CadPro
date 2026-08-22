@@ -1,6 +1,9 @@
+import os
+
 import cv2
 import numpy as np
 from typer.testing import CliRunner
+import uvicorn
 
 from cadpro.cli import app
 
@@ -56,3 +59,21 @@ def test_turntable_command_writes_visual_hull_step(tmp_path):
     assert output.exists()
     assert "4 turntable views" in result.output
     assert "frames 0, 2, 4, 6" in result.output
+
+
+def test_web_command_uses_its_actual_origin_and_disables_forwarded_headers(monkeypatch):
+    calls = []
+    monkeypatch.delenv("CADPRO_PUBLIC_ORIGIN", raising=False)
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    result = CliRunner().invoke(
+        app,
+        ["web", "--host", "::1", "--port", "8765", "--no-open"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "http://[::1]:8765" in result.output
+    assert os.environ["CADPRO_PUBLIC_ORIGIN"] == "http://[::1]:8765"
+    assert calls == [
+        (("cadpro.web:app",), {"host": "::1", "port": 8765, "log_level": "info", "proxy_headers": False})
+    ]

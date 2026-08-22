@@ -1,6 +1,10 @@
 from pathlib import Path
 
 import pygltflib
+import numpy as np
+import pytest
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+from OCP.gp import gp_Pnt
 
 from cad_diff.face_matcher import match_faces
 from cad_diff.face_signatures import extract_faces
@@ -10,6 +14,21 @@ from cad_diff.signatures import fingerprint_solid
 from cad_diff.step_io import load_step
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
+
+
+def _position_bounds(payload: bytes):
+    document = pygltflib.GLTF2().load_from_bytes(payload)
+    blob = document.binary_blob()
+    accessor = document.accessors[document.meshes[0].primitives[0].attributes.POSITION]
+    view = document.bufferViews[accessor.bufferView]
+    offset = (view.byteOffset or 0) + (accessor.byteOffset or 0)
+    positions = np.frombuffer(
+        blob,
+        dtype="<f4",
+        count=accessor.count * 3,
+        offset=offset,
+    ).reshape((-1, 3))
+    return positions.min(axis=0), positions.max(axis=0)
 
 
 def _single_shape(step_path: Path):
@@ -99,3 +118,25 @@ def test_invalid_visual_solid_fails_fast():
 
     with pytest.raises(ValueError, match="missing its modified shape"):
         build_assembly_diff_glb([VisualSolid(status="added")])
+
+
+def test_assembly_glb_vertex_transform_is_opt_in():
+    shape = BRepPrimAPI_MakeBox(gp_Pnt(100, 200, 300), 10, 20, 30).Shape()
+    visual = VisualSolid(status="unchanged", modified_shape=shape)
+
+    original_min, original_max = _position_bounds(build_assembly_diff_glb([visual]))
+    transformed_min, transformed_max = _position_bounds(
+        build_assembly_diff_glb(
+            [visual],
+            vertex_transform=lambda vertex: (
+                vertex[0] * 0.001,
+                vertex[2] * 0.001,
+                -vertex[1] * 0.001,
+            ),
+        )
+    )
+
+    assert original_min == pytest.approx((100.0, 200.0, 300.0))
+    assert original_max == pytest.approx((110.0, 220.0, 330.0))
+    assert transformed_min == pytest.approx((0.100, 0.300, -0.220))
+    assert transformed_max == pytest.approx((0.110, 0.330, -0.200))

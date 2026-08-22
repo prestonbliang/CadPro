@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from typing import Callable
 
 import pygltflib as gltf
 from OCP.TopoDS import TopoDS_Shape
@@ -17,6 +18,9 @@ _STATUS_COLOR = {
     "removed": (0.82, 0.24, 0.20, 0.5),  # translucent — this geometry is a ghost, it no longer exists
 }
 _STATUS_ORDER = ["unchanged", "modified", "added", "removed"]  # draw removed (translucent) last
+
+Vertex = tuple[float, float, float]
+VertexTransform = Callable[[Vertex], Vertex]
 
 
 @dataclass(frozen=True)
@@ -46,8 +50,17 @@ def build_diff_glb(base_shape, modified_shape, face_diffs: list[FaceDiff]) -> by
     )
 
 
-def build_assembly_diff_glb(solids: list[VisualSolid]) -> bytes:
-    """Build a complete assembly GLB without dropping whole-solid changes."""
+def build_assembly_diff_glb(
+    solids: list[VisualSolid],
+    *,
+    vertex_transform: VertexTransform | None = None,
+) -> bytes:
+    """Build a complete assembly GLB without dropping whole-solid changes.
+
+    ``vertex_transform`` is deliberately opt-in so cad-diff reports retain
+    their established model coordinates. Interchange exporters can use it to
+    convert source units and axes while the mesh is serialized.
+    """
     if not solids:
         raise ValueError("cannot build a visual diff for an empty assembly")
 
@@ -55,7 +68,10 @@ def build_assembly_diff_glb(solids: list[VisualSolid]) -> bytes:
     for solid in solids:
         _append_visual_solid(buckets, solid)
 
-    return _build_glb({status: meshes for status, meshes in buckets.items() if meshes})
+    return _build_glb(
+        {status: meshes for status, meshes in buckets.items() if meshes},
+        vertex_transform=vertex_transform,
+    )
 
 
 def _append_visual_solid(buckets: dict[str, list[FaceMesh]], solid: VisualSolid) -> None:
@@ -89,7 +105,11 @@ def _append_visual_solid(buckets: dict[str, list[FaceMesh]], solid: VisualSolid)
     buckets[solid.status].extend(tessellate_shape(shape).values())
 
 
-def _build_glb(buckets: dict[str, list[FaceMesh]]) -> bytes:
+def _build_glb(
+    buckets: dict[str, list[FaceMesh]],
+    *,
+    vertex_transform: VertexTransform | None = None,
+) -> bytes:
     binary = bytearray()
     buffer_views: list[gltf.BufferView] = []
     accessors: list[gltf.Accessor] = []
@@ -105,7 +125,10 @@ def _build_glb(buckets: dict[str, list[FaceMesh]]) -> bytes:
         triangles: list[tuple[int, int, int]] = []
         for mesh in meshes:
             offset = len(vertices)
-            vertices.extend(mesh.vertices)
+            if vertex_transform is None:
+                vertices.extend(mesh.vertices)
+            else:
+                vertices.extend(vertex_transform(vertex) for vertex in mesh.vertices)
             triangles.extend((a + offset, b + offset, c + offset) for a, b, c in mesh.triangles)
         if not triangles:
             continue

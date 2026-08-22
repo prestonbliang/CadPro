@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import threading
+import webbrowser
 
 import typer
 
@@ -65,6 +68,33 @@ def turntable(
     typer.echo(
         f"Created {result.output} from {len(result.sampled_frames)} turntable views "
         f"(frames {frames}), scaled to {width_mm:g} mm maximum width"
+    )
+
+
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", help="Network interface for the website."),
+    port: int = typer.Option(8000, min=1, max=65535, help="Website port."),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the website after launch."),
+) -> None:
+    """Launch the CadPro reconstruction website."""
+    import uvicorn
+
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url_host = f"[{display_host}]" if ":" in display_host else display_host
+    url = f"http://{url_host}:{port}"
+    os.environ.setdefault("CADPRO_PUBLIC_ORIGIN", url)
+    if open_browser:
+        browser_timer = threading.Timer(1.0, lambda: webbrowser.open(url))
+        browser_timer.daemon = True
+        browser_timer.start()
+    typer.echo(f"CadPro is running at {url}")
+    uvicorn.run(
+        "cadpro.web:app",
+        host=host,
+        port=port,
+        log_level="info",
+        proxy_headers=False,
     )
 
 

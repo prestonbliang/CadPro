@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0f14">
+  <meta name="description" content="Turn a complete photo orbit or turntable video into validated STEP and mesh geometry.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="CadPro — Real geometry from a complete orbit">
+  <meta property="og:description" content="Turn 20–50 ordered photos or a complete turntable video into validated STEP, STL, and GLB geometry.">
+  <meta property="og:image" content="__CADPRO_ORIGIN__/static/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="CadPro — Real geometry from a complete orbit">
+  <meta name="twitter:description" content="Turn 20–50 ordered photos or a complete turntable video into validated STEP, STL, and GLB geometry.">
+  <meta name="twitter:image" content="__CADPRO_ORIGIN__/static/og.png">
+  <title>CadPro — Reconstruction Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="CadPro home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>CADPRO</span>
+    </a>
+    <div class="status-pill"><span></span> Geometry engine ready</div>
+    <a class="text-link" href="#capture-guide">Capture guide <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main class="page-shell">
+    <section class="intro">
+      <div>
+        <p class="eyebrow">RECONSTRUCTION STUDIO / 01</p>
+        <h1>Real geometry from<br><em>a complete orbit.</em></h1>
+      </div>
+      <p class="lede">Load every angle. Set one real measurement. CadPro intersects the visible profiles into a watertight model you can continue in Onshape, Blender, Fusion, or SolidWorks.</p>
+    </section>
+
+    <section class="studio" aria-label="Reconstruction workspace">
+      <aside class="step-rail" aria-label="Workflow progress">
+        <ol>
+          <li class="active"><span>01</span><div><b>Capture</b><small>Add a full orbit</small></div></li>
+          <li><span>02</span><div><b>Calibrate</b><small>Set real scale</small></div></li>
+          <li><span>03</span><div><b>Reconstruct</b><small>Build the hull</small></div></li>
+          <li><span>04</span><div><b>Export</b><small>STEP + mesh</small></div></li>
+        </ol>
+        <div class="rail-note">
+          <span class="note-index">A</span>
+          <p><b>One complete turn.</b> Keep the camera fixed and the object centered.</p>
+        </div>
+      </aside>
+
+      <div class="workbench">
+        <div class="mode-switch" role="tablist" aria-label="Input type">
+          <button class="mode-button active" type="button" data-mode="photos" role="tab" aria-selected="true">
+            <span class="mode-icon photo-icon" aria-hidden="true"></span>
+            <span><b>Photo orbit</b><small>20–50 ordered images</small></span>
+            <i>RECOMMENDED</i>
+          </button>
+          <button class="mode-button" type="button" data-mode="video" role="tab" aria-selected="false">
+            <span class="mode-icon video-icon" aria-hidden="true"></span>
+            <span><b>Turntable video</b><small>One constant-speed rotation</small></span>
+          </button>
+        </div>
+
+        <div class="work-card">
+          <div class="card-heading">
+            <div><span class="section-number">01</span><h2 id="upload-title">Add your photo orbit</h2></div>
+            <span class="file-counter" id="file-counter">0 / 20 minimum</span>
+          </div>
+
+          <label class="drop-zone" id="drop-zone" for="file-input">
+            <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" multiple>
+            <span class="drop-glyph" aria-hidden="true"><i></i><i></i></span>
+            <strong id="drop-title">Drop 20–50 photos here</strong>
+            <small id="drop-copy">or browse files · keep them in rotation order</small>
+            <span class="browse-chip">CHOOSE FILES</span>
+          </label>
+
+          <div class="selection" id="selection" hidden>
+            <div class="selection-head">
+              <p><b id="selection-count">0 views loaded</b><span id="selection-size">0 MB</span></p>
+              <button type="button" id="clear-files">Clear all</button>
+            </div>
+            <div class="thumbnail-strip" id="thumbnail-strip" aria-label="Selected capture order"></div>
+          </div>
+
+          <div class="calibration-grid">
+            <label class="field">
+              <span>Maximum object width <button class="tip" type="button" title="The largest real horizontal span visible anywhere in the full rotation.">?</button></span>
+              <div class="measure-input"><input id="width-mm" type="number" min="0.001" step="0.1" value="100" inputmode="decimal"><b>mm</b></div>
+            </label>
+            <label class="field">
+              <span>Rotation direction</span>
+              <select id="rotation-direction">
+                <option value="counterclockwise">Counterclockwise</option>
+                <option value="clockwise">Clockwise</option>
+              </select>
+            </label>
+            <label class="field video-setting" hidden>
+              <span>Silhouette views</span>
+              <div class="range-row"><input id="view-count" type="range" min="20" max="50" value="24"><output id="view-output">24</output></div>
+            </label>
+          </div>
+
+          <div class="quality-row" id="quality-row">
+            <div><span class="quality-dot waiting"></span><p><b>Capture count</b><small id="count-check">Add at least 20 photos</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b>Real scale</b><small id="scale-check">100 mm maximum width</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b>Input order</b><small>First to last around one turn</small></p></div>
+          </div>
+
+          <div class="action-row">
+            <p><span aria-hidden="true">●</span> Uploads are isolated per job and expire automatically.</p>
+            <button class="build-button" id="build-button" type="button" disabled>
+              <span>BUILD CAD MODEL</span><i aria-hidden="true">→</i>
+            </button>
+          </div>
+          <div class="message" id="message" role="alert" hidden></div>
+        </div>
+
+        <div class="progress-panel" id="progress-panel" hidden aria-live="polite">
+          <div class="progress-orbit" aria-hidden="true"><span></span><i></i></div>
+          <p class="eyebrow">GEOMETRY BUILD / LIVE</p>
+          <h2 id="progress-title">Preparing your capture</h2>
+          <p id="progress-copy">Checking every view before reconstruction begins.</p>
+          <div class="progress-track"><span id="progress-bar"></span></div>
+          <div class="progress-meta"><span id="progress-stage">UPLOAD</span><b id="progress-value">5%</b></div>
+          <ol class="build-stages">
+            <li class="active" data-stage="upload"><span>01</span>Secure inputs</li>
+            <li data-stage="segment"><span>02</span>Extract silhouettes</li>
+            <li data-stage="reconstruct"><span>03</span>Intersect geometry</li>
+            <li data-stage="export"><span>04</span>Validate + export</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="result-section" id="result-section" hidden aria-labelledby="result-title">
+      <div class="result-heading">
+        <div><p class="eyebrow">RECONSTRUCTION COMPLETE / 04</p><h2 id="result-title">Your model is ready.</h2></div>
+        <button class="secondary-button" id="new-model" type="button">START ANOTHER MODEL</button>
+      </div>
+      <div class="result-grid">
+        <div class="model-stage">
+          <iframe id="model-preview" title="Interactive reconstructed model preview"></iframe>
+          <div class="model-stage-label"><span></span>VALIDATED SOLID · DRAG TO ORBIT</div>
+        </div>
+        <aside class="result-panel">
+          <div class="result-badge"><span>✓</span><p><b>CAD integrity passed</b><small>STEP round-trip verified as one closed solid</small></p></div>
+          <div class="metric-grid">
+            <div><span>SIZE X</span><b id="metric-x">—</b><small>mm</small></div>
+            <div><span>SIZE Y</span><b id="metric-y">—</b><small>mm</small></div>
+            <div><span>SIZE Z</span><b id="metric-z">—</b><small>mm</small></div>
+            <div><span>VOLUME</span><b id="metric-volume">—</b><small>mm³</small></div>
+            <div><span>FACES</span><b id="metric-faces">—</b><small>B-rep</small></div>
+            <div><span>VIEWS</span><b id="metric-views">—</b><small>used</small></div>
+          </div>
+          <div class="download-stack">
+            <a class="download primary" id="download-step" href="#"><span><b>STEP</b><small>Onshape · Fusion · SolidWorks</small></span><i>DOWNLOAD →</i></a>
+            <a class="download" id="download-stl" href="#"><span><b>STL</b><small>Blender · slicers · mesh tools</small></span><i>DOWNLOAD →</i></a>
+            <a class="download" id="download-glb" href="#"><span><b>GLB</b><small>Blender · web · real-time 3D</small></span><i>DOWNLOAD →</i></a>
+            <a class="report-link" id="download-report" href="#">Download reconstruction report (.json)</a>
+          </div>
+          <div class="truth-note"><span>!</span><p><b>Silhouette-derived geometry</b>This is a validated visual hull. Features never visible in an outline cannot be recovered from ordinary photos.</p></div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="capture-guide" id="capture-guide">
+      <div><p class="eyebrow">CAPTURE CONTRACT / 02</p><h2>The model is only as complete<br>as the orbit you give it.</h2></div>
+      <ol>
+        <li><span>01</span><p><b>Lock the camera</b>Use a tripod. No zoom, pan, or focus changes.</p></li>
+        <li><span>02</span><p><b>Center the axis</b>Rotate the object around the exact center of frame.</p></li>
+        <li><span>03</span><p><b>Light the outline</b>Use a plain background with clean edge contrast.</p></li>
+        <li><span>04</span><p><b>Complete 360°</b>Space photos evenly or film one steady revolution.</p></li>
+      </ol>
+    </section>
+  </main>
+
+  <footer><span>CADPRO / GEOMETRY RECONSTRUCTION</span><span>STEP · STL · GLB</span></footer>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
