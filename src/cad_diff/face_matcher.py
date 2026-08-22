@@ -23,6 +23,8 @@ TIER4_MAX_RESIDUAL = 12
 
 UNCHANGED_AREA_TOL = 1e-4  # mm^2, round-trip noise
 UNCHANGED_CENTROID_TOL = 1e-4  # mm
+UNCHANGED_BBOX_TOL = 1e-4  # mm
+UNCHANGED_PARAM_TOL = 1e-4  # native units (mm or degrees)
 
 
 def _cost(a: FaceFingerprint, b: FaceFingerprint) -> float:
@@ -37,7 +39,19 @@ def _cost(a: FaceFingerprint, b: FaceFingerprint) -> float:
 def _status(a: FaceFingerprint, b: FaceFingerprint) -> str:
     area_delta = abs(a.area - b.area)
     centroid_delta = math.dist(a.centroid, b.centroid)
-    if area_delta < UNCHANGED_AREA_TOL and centroid_delta < UNCHANGED_CENTROID_TOL:
+    bbox_delta = max(
+        abs(left - right)
+        for left, right in zip((*a.bbox_min, *a.bbox_max), (*b.bbox_min, *b.bbox_max))
+    )
+    params_unchanged = a.params.keys() == b.params.keys() and all(
+        abs(a.params[name] - b.params[name]) < UNCHANGED_PARAM_TOL for name in a.params
+    )
+    if (
+        area_delta < UNCHANGED_AREA_TOL
+        and centroid_delta < UNCHANGED_CENTROID_TOL
+        and bbox_delta < UNCHANGED_BBOX_TOL
+        and params_unchanged
+    ):
         return "unchanged"
     return "modified"
 

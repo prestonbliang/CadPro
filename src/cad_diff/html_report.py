@@ -29,7 +29,10 @@ def _data_uri(js_source: str) -> str:
 
 
 def _import_map_json() -> str:
-    imports = {name: _data_uri((_VENDOR_DIR / filename).read_text()) for name, filename in _VENDOR_FILES.items()}
+    imports = {
+        name: _data_uri((_VENDOR_DIR / filename).read_text(encoding="utf-8"))
+        for name, filename in _VENDOR_FILES.items()
+    }
     return json.dumps({"imports": imports})
 
 
@@ -37,10 +40,10 @@ def render_html(glb_bytes: bytes, title: str) -> str:
     """A single self-contained HTML file: the diff GLB and all of three.js
     embedded inline as base64, zero network access, zero server, drag into
     a browser or attach to Slack."""
-    template = Template((_VIEWER_DIR / "template.html.j2").read_text())
+    template = Template((_VIEWER_DIR / "template.html.j2").read_text(encoding="utf-8"))
     return template.render(
         title=title,
         import_map_json=_import_map_json(),
         glb_base64=base64.b64encode(glb_bytes).decode("ascii"),
-        viewer_js=(_VIEWER_DIR / "viewer.js").read_text(),
+        viewer_js=(_VIEWER_DIR / "viewer.js").read_text(encoding="utf-8"),
     )

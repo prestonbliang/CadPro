@@ -126,3 +126,12 @@ def test_large_single_type_bucket_stays_fast():
     diffs = match_faces(faces, faces)
     assert time.time() - t0 < 5.0
     assert all(d.status == "unchanged" for d in diffs)
+
+
+def test_param_change_cannot_hide_behind_equal_area_and_centroid():
+    base = [_face(1, "Cylinder", 31.42, (0, 0, 0), [], params={"radius": 2.0})]
+    modified = [_face(1, "Cylinder", 31.42, (0, 0, 0), [], params={"radius": 4.0})]
+
+    (diff,) = match_faces(base, modified)
+
+    assert diff.status == "modified"

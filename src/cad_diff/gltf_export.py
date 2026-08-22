@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
+from typing import Callable
 
 import pygltflib as gltf
+from OCP.TopoDS import TopoDS_Shape
 
 from cad_diff.diff_model import FaceDiff
 from cad_diff.tessellate import FaceMesh, tessellate_shape
@@ -16,26 +19,97 @@ _STATUS_COLOR = {
 }
 _STATUS_ORDER = ["unchanged", "modified", "added", "removed"]  # draw removed (translucent) last
 
+Vertex = tuple[float, float, float]
+VertexTransform = Callable[[Vertex], Vertex]
+
+
+@dataclass(frozen=True)
+class VisualSolid:
+    """One assembly solid and the geometry needed to visualize its status."""
+
+    status: str
+    base_shape: TopoDS_Shape | None = None
+    modified_shape: TopoDS_Shape | None = None
+    face_diffs: tuple[FaceDiff, ...] = ()
+
 
 def build_diff_glb(base_shape, modified_shape, face_diffs: list[FaceDiff]) -> bytes:
     """Tessellate both shapes and bucket their triangles into one GLB by diff
     status — a single self-contained scene showing the current (modified)
     geometry with additions/changes highlighted, plus translucent red ghosts
     of whatever the base had that's now gone."""
-    base_meshes = tessellate_shape(base_shape)
-    mod_meshes = tessellate_shape(modified_shape)
+    return build_assembly_diff_glb(
+        [
+            VisualSolid(
+                status="modified",
+                base_shape=base_shape,
+                modified_shape=modified_shape,
+                face_diffs=tuple(face_diffs),
+            )
+        ]
+    )
+
+
+def build_assembly_diff_glb(
+    solids: list[VisualSolid],
+    *,
+    vertex_transform: VertexTransform | None = None,
+) -> bytes:
+    """Build a complete assembly GLB without dropping whole-solid changes.
+
+    ``vertex_transform`` is deliberately opt-in so cad-diff reports retain
+    their established model coordinates. Interchange exporters can use it to
+    convert source units and axes while the mesh is serialized.
+    """
+    if not solids:
+        raise ValueError("cannot build a visual diff for an empty assembly")
 
     buckets: dict[str, list[FaceMesh]] = {status: [] for status in _STATUS_ORDER}
-    for face_diff in face_diffs:
-        if face_diff.status == "removed":
-            buckets["removed"].append(base_meshes[face_diff.base.index])
-        else:
-            buckets[face_diff.status].append(mod_meshes[face_diff.modified.index])
+    for solid in solids:
+        _append_visual_solid(buckets, solid)
 
-    return _build_glb({status: meshes for status, meshes in buckets.items() if meshes})
+    return _build_glb(
+        {status: meshes for status, meshes in buckets.items() if meshes},
+        vertex_transform=vertex_transform,
+    )
 
 
-def _build_glb(buckets: dict[str, list[FaceMesh]]) -> bytes:
+def _append_visual_solid(buckets: dict[str, list[FaceMesh]], solid: VisualSolid) -> None:
+    if solid.status not in _STATUS_ORDER:
+        raise ValueError(f"unknown solid diff status: {solid.status}")
+
+    if solid.status == "modified":
+        if solid.base_shape is None or solid.modified_shape is None or not solid.face_diffs:
+            raise ValueError("modified visual solids require both shapes and face diffs")
+        base_meshes = tessellate_shape(solid.base_shape)
+        modified_meshes = tessellate_shape(solid.modified_shape)
+        for face_diff in solid.face_diffs:
+            if face_diff.status == "removed":
+                if face_diff.base is None:
+                    raise ValueError("removed face diff is missing its base fingerprint")
+                buckets["removed"].append(base_meshes[face_diff.base.index])
+            else:
+                if face_diff.modified is None:
+                    raise ValueError(
+                        f"{face_diff.status} face diff is missing its modified fingerprint"
+                    )
+                buckets[face_diff.status].append(modified_meshes[face_diff.modified.index])
+        return
+
+    if solid.face_diffs:
+        raise ValueError(f"{solid.status} visual solids cannot contain face diffs")
+    shape = solid.base_shape if solid.status == "removed" else solid.modified_shape
+    if shape is None:
+        side = "base" if solid.status == "removed" else "modified"
+        raise ValueError(f"{solid.status} visual solid is missing its {side} shape")
+    buckets[solid.status].extend(tessellate_shape(shape).values())
+
+
+def _build_glb(
+    buckets: dict[str, list[FaceMesh]],
+    *,
+    vertex_transform: VertexTransform | None = None,
+) -> bytes:
     binary = bytearray()
     buffer_views: list[gltf.BufferView] = []
     accessors: list[gltf.Accessor] = []
@@ -51,7 +125,10 @@ def _build_glb(buckets: dict[str, list[FaceMesh]]) -> bytes:
         triangles: list[tuple[int, int, int]] = []
         for mesh in meshes:
             offset = len(vertices)
-            vertices.extend(mesh.vertices)
+            if vertex_transform is None:
+                vertices.extend(mesh.vertices)
+            else:
+                vertices.extend(vertex_transform(vertex) for vertex in mesh.vertices)
             triangles.extend((a + offset, b + offset, c + offset) for a, b, c in mesh.triangles)
         if not triangles:
             continue

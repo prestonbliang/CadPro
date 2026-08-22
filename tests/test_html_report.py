@@ -47,7 +47,7 @@ def test_no_relative_imports_survived_the_vendoring_rewrite():
     if not vendor_dir.exists():
         vendor_dir = Path(__file__).parent.parent / "src" / "cad_diff" / "viewer" / "vendor"
     for js_file in vendor_dir.glob("*.js"):
-        text = js_file.read_text()
+        text = js_file.read_text(encoding="utf-8")
         for match in re.finditer(r"from\s+['\"](\.[^'\"]*)['\"]", text):
             raise AssertionError(f"{js_file.name} has an unrewritten relative import: {match.group(1)}")
 

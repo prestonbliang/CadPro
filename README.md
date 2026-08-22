@@ -1,127 +1,196 @@
-# cad-diff
+# CadPro
 
-Semantic version control for mechanical CAD. A git-diff for solid geometry — point it
-at two STEP files and get back what actually changed, not "the binary is different."
+CadPro turns a complete photo orbit or turntable video into validated 3D geometry through
+a guided web application. Upload 20–50 ordered photos—or one steady 360° video—enter one
+real measurement, inspect the reconstructed model, and download:
 
+- **STEP** for Onshape, Fusion, SolidWorks, FreeCAD, and other CAD systems
+- **STL** for Blender, slicers, and mesh workflows
+- **GLB** for Blender, web viewers, and real-time 3D tools
+- **JSON diagnostics** recording the inputs and verified geometry measurements
+
+The STEP output is a genuine OpenCascade boundary-representation solid. CadPro reloads
+every exported STEP and rejects it unless it contains exactly one valid volumetric solid.
+STL and GLB are included because Blender does not natively import STEP in a standard
+installation.
+
+## Version 1.0 — complete web workflow
+
+- Responsive photo/video upload studio
+- Ordered photo thumbnails with manual reordering
+- Client- and server-side count, format, dimension, size, and scale checks
+- Private asynchronous reconstruction jobs with progress and actionable errors
+- Automatic background separation and silhouette extraction
+- 20–50 evenly spaced views around one complete revolution
+- Clockwise and counterclockwise capture support
+- Fixed-axis, consistently scaled visual-hull reconstruction
+- OpenCascade validity, connected-solid, positive-volume, and STEP round-trip checks
+- Interactive offline 3D result preview
+- Atomic STEP, binary STL, GLB, HTML preview, and report generation
+- Opaque artifact download IDs; server filesystem paths are never sent to the browser
+- Bounded admission (one active reconstruction plus one queued upload by default)
+- 24-hour job expiry with periodic cleanup while running and cleanup at shutdown
+- Trusted Host, same-origin browser upload, and early multipart body-size enforcement
+- Docker packaging and health endpoint
+- The earlier command-line converters and `cad-diff` remain available
+
+## Install and launch
+
+CadPro requires Python 3.10 or newer.
+
+### Windows PowerShell
+
+```powershell
+py -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\cadpro.exe web
 ```
-$ cad-diff examples/fillet_v1.step examples/fillet_v2.step
 
-   examples/fillet_v1.step  →  examples/fillet_v2.step
-┏━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
-┃ Solid   ┃ Status   ┃ Volume Δ (mm³) ┃ Surface Δ (mm²) ┃
-┡━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
-│ solid_1 │ modified │        -25.752 │         -13.735 │
-└─────────┴──────────┴────────────────┴─────────────────┘
+### macOS/Linux
 
-solid_1 face detail  (boolean cross-check: +0.000 / -25.752 mm³, tier 5 ground truth)
-┏━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ Face ┃ Type     ┃ Status    ┃ Tier ┃ Area Δ (mm²) ┃ Param Δ        ┃
-┡━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ 3    │ Cylinder │ modified  │ T1   │      +31.416 │ radius: +2.000 │
-└──────┴──────────┴───────────┴──────┴──────────────┴────────────────┘
-```
-
-That's the whole pitch in one line: a fillet radius changed from 2mm to 4mm, and it's
-reported as a modified face with a dimensional delta — not an unmatched delete+add.
-
-## Status: Phase 3 — visual diff
-
-- **Tier 0** — whole-solid matching by geometric fingerprint (volume, surface area,
-  center of mass, bounding box), robust to assembly reordering. Rejects pairings that
-  are too dissimilar to be the same solid, instead of force-matching whatever's left.
-- **Tiers 1–4** — face-level matching cascade: bucket-and-assign by surface type
-  (Tier 1), adjacency-graph propagation from confident anchors (Tier 3), residual
-  subgraph isomorphism for what's left (Tier 4) — never run on the whole model, only
-  the small leftover island, since general graph isomorphism is NP-complete.
-- **Tier 5** — independent boolean (`Cut`/`Common`) volumetric cross-check, the same
-  technique SolidWorks's own Compare Geometry tool uses internally.
-- Matched faces of the same analytic surface type report the actual dimensional delta
-  (`radius: +2.000`), not just "this region differs."
-- `--html out.html` renders a color-coded 3D diff — gray/yellow/green/translucent-red
-  for unchanged/modified/added/removed — as one self-contained file: the geometry
-  (glTF) and all of three.js are embedded as base64 data URIs behind a static import
-  map, so it opens with zero network access and zero server, drag-into-browser or
-  attach-to-Slack.
-
-**Real-world validation, two vendors now:** `examples/real_world/` holds real,
-non-OCP-authored parts from two different CAD export pipelines — a u-blox SolidWorks
-2014 assembly (housing, PCB, antenna — one with actual free-form `BSplineSurface`
-faces) and an Adafruit Fusion 360 part, both real products, not synthetic fixtures
-(see `NOTICE.md` for source and license on each). Findings:
-- The XCAF loader originally treated a real assembly as one opaque compound. Real
-  assemblies decompose into multiple named leaf solids (`load_step` now walks and
-  positions them recursively); fixed after this file exposed it.
-- Solid-level matching found the loose bug documented above (`NOT_A_MATCH_COST` never
-  wired up) — same class of gap, real data surfaced it faster than synthetic data did.
-- Re-exporting the same real assembly in a different STEP schema (AP203 → AP214, 23
-  seconds apart, same SolidWorks session) correctly reports all three parts unchanged —
-  zero false positives from schema noise.
-- A genuine small edit (a 0.3mm hole cut into a real 54-face SolidWorks housing wall)
-  stays correctly localized: exactly 1 added face + 2 modified faces out of 55, not a
-  cascade of spurious changes. The real `BSplineSurface` faces on the antenna
-  participate in matching correctly and never get a fabricated dimensional delta.
-- The same edit on the real Fusion 360 part exposed a second real bug: Tier 5's boolean
-  cross-check (`BRepAlgoAPI_Cut`) reported success (`IsDone() == True`) while producing
-  a geometrically **invalid** result — two independently STEP-round-tripped copies of
-  "the same" solid don't align to sub-micron tolerance everywhere, and the boolean op
-  silently degenerated instead of failing loudly. It printed `+1768/-1772mm³` for an
-  actual ~4mm³ edit. Fixed by checking `BRepCheck_Analyzer(...).IsValid()` and refusing
-  to report the cross-check as trustworthy when it isn't — the face-level diff (which
-  stayed correct throughout) is the one you should trust either way.
-- Scale, not just vendor diversity: a real 7MB, 4-part, 1700+-face SolidWorks assembly
-  (same license grant, source in `NOTICE.md`) loaded in ~5s; its 811-face PCB
-  self-diffed in 0.33s, including a 671×671 Hungarian assignment for Tier 1's Plane
-  bucket — no scaling cliff at real-world part complexity. A second real edit, on a
-  114-face sheet-metal-style part from that assembly, confirmed the boolean-cross-check
-  failure above isn't universal on real data — it's genuinely per-pair, and this one
-  came back reliable and correct.
-
-**Still open — the actual go/no-go gate:** two vendors (SolidWorks, Fusion 360) is
-real progress but not the full picture. NX, Creo, and CATIA exports remain untested —
-they're rare in freely-licensed public repos (checked several candidates: no LICENSE
-file, or a curated aggregator with per-file licensing too ambiguous to trust blind),
-and I don't have those CAD packages to produce clean data myself.
-
-**Also honest:** the `--html` viewer's rendering pipeline (WebGL, DOM, OrbitControls)
-is unverified in a real browser — this sandbox has no attached display and every
-headless-browser option (Playwright's Chromium/WebKit, Safari automation) is blocked by
-the OS version or a GUI permission dialog. What *is* verified, independently, in a real
-JS engine (Node): the entire vendored three.js/GLTFLoader/OrbitControls module graph
-links and executes with no missing exports, three.js's own `GLTFLoader` successfully
-parses cad-diff's actual GLB output (not just pygltflib's), and the base64 payload
-embedded in a real generated report decodes byte-for-byte identical to the source GLB.
-Open a generated report in a real browser before trusting it renders correctly.
-
-## Setup
-
-```
+```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python examples/generate.py          # bracket_v1/v2 — added/modified solids
-.venv/bin/cad-diff examples/bracket_v1.step examples/bracket_v2.step
-.venv/bin/cad-diff examples/fillet_v1.step examples/fillet_v2.step --html /tmp/fillet_diff.html
-.venv/bin/pytest
+.venv/bin/cadpro web
 ```
 
-## Layout
+The website opens at `http://127.0.0.1:8000`. Use `cadpro web --no-open` when you do not
+want CadPro to open a browser automatically.
 
+## Photo workflow
+
+1. Place the object on a turntable against a plain, contrasting background.
+2. Fix the camera on a tripod, level with the object and aimed at the rotation axis.
+3. Take 20–50 evenly spaced photos over exactly one full revolution.
+4. Keep camera position, zoom, focus, image dimensions, and lighting unchanged.
+5. Select the images in rotation order. The website lets you correct their order.
+6. Enter the object's real maximum horizontal span in millimeters.
+7. Choose the rotation direction as viewed from above and build the model.
+
+CadPro interprets photo `n` as angle `n × 360 / photo_count`; filenames do not supply
+angles. Every photo must show the complete object without touching the image border.
+
+## Video workflow
+
+Record exactly one constant-speed 360° revolution, then select 20–50 sampled views in the
+website. A distant or zoomed camera gives a closer approximation to the orthographic
+projection used by visual-hull reconstruction.
+
+If only part of a longer recording contains the clean revolution, the Python API and CLI
+also support a half-open frame range: the start frame is included and the end frame is not.
+
+## Docker
+
+```bash
+docker build -t cadpro .
+docker run --rm -p 127.0.0.1:8000:8000 \
+  -e CADPRO_PUBLIC_ORIGIN=http://localhost:8000 \
+  cadpro
 ```
-src/cad_diff/
-  step_io.py          STEP → XCAF loading
-  signatures.py        per-solid geometric fingerprint (Tier 0)
-  matcher.py             Tier 0: solid fingerprint matching (Hungarian assignment)
-  face_signatures.py       per-face signature + adjacency graph
-  face_matcher.py             Tiers 1–4: the face-matching cascade
-  boolean_diff.py                Tier 5: boolean cross-check
-  tessellate.py                    per-face triangulation, orientation-aware winding
-  gltf_export.py                     tessellated + classified faces -> colored GLB
-  html_report.py                       GLB + vendored three.js -> one self-contained HTML
-  viewer/
-    template.html.j2                     the HTML shell (import map, legend, canvas)
-    viewer.js                              scene setup, GLB load, layer-toggle legend
-    vendor/                                  three.js core + GLTFLoader + OrbitControls,
-                                              relative imports rewritten to bare specifiers
-  diff_model.py                    shared data contract
-  report.py                          terminal rendering
-  cli.py                                entry point
+
+The explicit `127.0.0.1` publish address keeps the container reachable only from the local
+machine. `CADPRO_PUBLIC_ORIGIN` supplies social-preview URLs and the permitted browser
+upload origin; its hostname is also trusted for the HTTP `Host` header. Loopback hosts are
+always trusted. For a reverse proxy with another internal host, add a comma-separated
+`CADPRO_TRUSTED_HOSTS` value and configure the proxy to preserve the public Host. The image
+does not trust forwarded headers by default.
+
+The service has no user accounts. Keep it on localhost, or place it behind authentication,
+TLS, and network-level upload/rate limits before exposing it to the public internet. The
+application itself admits at most two unfinished jobs by default, preventing an unbounded
+reconstruction queue.
+
+## Command-line workflows
+
+Profile-extrude one image or the clearest frame in a normal video:
+
+```powershell
+.venv\Scripts\cadpro.exe convert bracket.png --width-mm 120 --depth-mm 8 -o bracket.step
+```
+
+Reconstruct a turntable video directly:
+
+```powershell
+.venv\Scripts\cadpro.exe turntable part.mp4 --width-mm 75 --views 24 -o part.step
+```
+
+Compare two existing STEP files:
+
+```powershell
+.venv\Scripts\cad-diff.exe old.step new.step --html diff.html
+```
+
+## STEP comparison and real-world validation
+
+The included `cad-diff` tool provides semantic version control for mechanical CAD: it
+reports which solids and faces changed instead of treating two STEP files as unrelated
+binary blobs.
+
+- **Tier 0** matches whole solids by volume, surface area, center of mass, and bounding
+  box, while tolerating assembly reordering and rejecting implausible matches.
+- **Tiers 1–4** match faces by analytic surface type, adjacency, and residual subgraph
+  structure. Matched analytic faces report dimensional changes such as
+  `radius: +2.000`.
+- **Tier 5** independently cross-checks added and removed volume with OpenCascade boolean
+  operations. A cross-check is reported only when the resulting shapes pass geometric
+  validity checks.
+- `--html out.html` creates a self-contained, offline 3D report with unchanged, modified,
+  added, and removed geometry shown as separate color-coded layers.
+
+The bundled `examples/real_world/` corpus covers SolidWorks 2014 and Fusion 360 exports,
+including assemblies, schema changes, free-form `BSplineSurface` faces, and localized
+edits. See `examples/real_world/NOTICE.md` for provenance and licensing. It exposed and
+helped fix assembly-leaf traversal, overly permissive solid matching, and a failure mode
+where a boolean operation claimed success but returned invalid geometry.
+
+Observed regression results on that corpus include:
+
+- Re-exporting one three-part SolidWorks assembly from AP203 to AP214 reports all three
+  parts unchanged, with no false positives from schema noise.
+- Cutting a 0.3 mm hole in a 54-face housing remains localized to one added and two
+  modified faces; its free-form antenna faces still match without invented dimensions.
+- A 7 MB, four-part, 1,700+-face SolidWorks assembly loaded in about five seconds. Its
+  811-face PCB self-diff completed in 0.33 seconds, including a 671×671 plane-face
+  assignment.
+- An invalid Fusion 360 boolean result that overstated an approximately 4 mm³ edit as
+  thousands of cubic millimeters is now rejected instead of presented as ground truth.
+
+These are measured development results, not universal performance guarantees. Coverage
+still does not include NX, Creo, or CATIA exports. An additional licensed or private
+vendor corpus can be exercised through `CAD_DIFF_CORPUS`; its manifest format and test
+command are documented in `docs/external-corpus.md`.
+
+## Technical truth and limitations
+
+CadPro's multi-view path builds a **visual hull** by intersecting the viewing volume of
+every extracted silhouette. This is real, watertight CAD geometry, but it is not magic and
+it is not the same as a native parametric feature history.
+
+Ordinary photos cannot reveal:
+
+- concavities that never alter an outside silhouette
+- hidden cavities or internal structure
+- top- or bottom-only features not seen by the level camera
+- exact design intent such as a nominal radius, thread, tolerance, or material
+
+Perspective, camera movement, a miscentered rotation axis, turntable wobble, reflections,
+transparency, shadows joined to the object, motion blur, and very thin features reduce
+accuracy. CadPro detects many unusable captures and fails clearly, but no software can
+make an exact engineering model from visual information that the capture never contains.
+For production parts, use the result as a reconstruction/reference body and verify critical
+dimensions in CAD before manufacturing.
+
+## Development
+
+```powershell
+.venv\Scripts\python.exe -m pytest
+```
+
+```text
+src/cadpro/web.py          upload API, job queue, artifact security, website serving
+src/cadpro/web_assets/     responsive reconstruction interface
+src/cadpro/reconstruct.py  ordered-photo and sampled-video reconstruction
+src/cadpro/artifacts.py    STEP/STL/GLB/preview/report export and verification
+src/cadpro/media.py        decoding, segmentation, and contour extraction
+src/cadpro/step.py         B-rep construction and visual-hull booleans
 ```
