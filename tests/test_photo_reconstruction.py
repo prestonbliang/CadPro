@@ -223,7 +223,13 @@ def test_video_wrapper_samples_twenty_evenly_spaced_views_and_releases(tmp_path,
             return True
 
         def get(self, property_id):
-            return 40
+            if property_id == cv2.CAP_PROP_FRAME_COUNT:
+                return 40
+            if property_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160
+            if property_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120
+            return 0
 
         def set(self, property_id, value):
             self.position = int(value)
@@ -266,7 +272,13 @@ def test_video_wrapper_rejects_short_range_before_reading(tmp_path, monkeypatch)
             return True
 
         def get(self, property_id):
-            return 100
+            if property_id == cv2.CAP_PROP_FRAME_COUNT:
+                return 100
+            if property_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160
+            if property_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120
+            return 0
 
         def release(self):
             self.released = True
@@ -282,5 +294,79 @@ def test_video_wrapper_rejects_short_range_before_reading(tmp_path, monkeypatch)
             start_frame=10,
             end_frame=25,
         )
+
+    assert capture.released
+
+
+def test_video_wrapper_rejects_unsafe_metadata_before_decoding(tmp_path, monkeypatch):
+    source = tmp_path / "turntable.mp4"
+    source.write_bytes(b"placeholder")
+
+    class FakeCapture:
+        released = False
+        read_called = False
+
+        def isOpened(self):
+            return True
+
+        def get(self, property_id):
+            if property_id == cv2.CAP_PROP_FRAME_COUNT:
+                return 40
+            if property_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 8_193
+            if property_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120
+            return 0
+
+        def read(self):
+            self.read_called = True
+            raise AssertionError("unsafe metadata must fail before frame decoding")
+
+        def release(self):
+            self.released = True
+
+    capture = FakeCapture()
+    monkeypatch.setattr(reconstruct_module.cv2, "VideoCapture", lambda path: capture)
+
+    with pytest.raises(ValueError, match="metadata is outside the image safety limits"):
+        reconstruct_module.reconstruct_turntable_video(source, 75, views=20)
+
+    assert capture.read_called is False
+    assert capture.released
+
+
+def test_video_wrapper_rechecks_every_decoded_frame_bound(tmp_path, monkeypatch):
+    source = tmp_path / "turntable.mp4"
+    source.write_bytes(b"placeholder")
+
+    class FakeCapture:
+        released = False
+
+        def isOpened(self):
+            return True
+
+        def get(self, property_id):
+            if property_id == cv2.CAP_PROP_FRAME_COUNT:
+                return 40
+            if property_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160
+            if property_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120
+            return 0
+
+        def set(self, property_id, value):
+            return True
+
+        def read(self):
+            return True, np.zeros((8, 8_193, 3), dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    capture = FakeCapture()
+    monkeypatch.setattr(reconstruct_module.cv2, "VideoCapture", lambda path: capture)
+
+    with pytest.raises(ValueError, match="frame 0 is outside the image safety limits"):
+        reconstruct_module.reconstruct_turntable_video(source, 75, views=20)
 
     assert capture.released

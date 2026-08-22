@@ -1,7 +1,12 @@
 [project]
 name = "cadpro"
-version = "1.1.0"
-description = "Turn one object image and measured dimensions into a validated 2.5D STEP solid."
+version = "2.0.0"
+description = "Reconstruct validated STEP and 3D assets from one photo, a photo orbit, or turntable video."
+readme = "README.md"
+authors = [
+    { name = "Preston L" },
+    { name = "Ethan C", email = "yil91974@gmail.com" },
+]
 requires-python = ">=3.10"
 dependencies = [
     "cadquery-ocp-novtk",
@@ -17,6 +22,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
+    "openai>=2.0,<3",
 ]
 
 [project.optional-dependencies]

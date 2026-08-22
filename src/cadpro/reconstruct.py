@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 from collections.abc import Callable
-from typing import Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -15,6 +15,8 @@ from cadpro.media import (
     VIDEO_EXTENSIONS,
     Silhouette,
     extract_silhouette,
+    validated_frame_dimensions,
+    validated_image_dimensions,
     validated_image_size,
 )
 from cadpro.step import solid_from_silhouette, visual_hull_from_silhouettes
@@ -46,6 +48,7 @@ class Reconstruction:
     silhouettes: tuple[Silhouette, ...]
     mode: Literal["image", "photos", "video"]
     source_names: tuple[str, ...]
+    enrichment: Mapping[str, Any] | None = None
 
     @property
     def input_diagnostics(self) -> tuple[InputDiagnostic, ...]:
@@ -198,6 +201,15 @@ def reconstruct_turntable_video(
     if not capture.isOpened():
         raise ValueError(f"OpenCV could not decode video: {source}")
     try:
+        try:
+            reported_size = validated_image_dimensions(
+                int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            )
+        except (OverflowError, ValueError) as error:
+            raise ValueError(
+                f"Video frame metadata is outside the image safety limits: {error}"
+            ) from error
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         if frame_count <= 0:
             raise ValueError("Video does not report a frame count; turntable sampling is unavailable")
@@ -223,6 +235,18 @@ def reconstruct_turntable_video(
             ok, frame = capture.read()
             if not ok or frame is None:
                 raise ValueError(f"Could not decode sampled video frame {frame_index}")
+            try:
+                decoded_size = validated_frame_dimensions(frame)
+            except ValueError as error:
+                raise ValueError(
+                    f"Video frame {frame_index} is outside the image safety limits: {error}"
+                ) from error
+            if decoded_size != reported_size:
+                raise ValueError(
+                    f"Video frame {frame_index} dimensions changed from "
+                    f"{reported_size[0]} x {reported_size[1]} to "
+                    f"{decoded_size[0]} x {decoded_size[1]}"
+                )
             try:
                 silhouette = extract_silhouette(frame, frame_index=frame_index)
             except ValueError as error:

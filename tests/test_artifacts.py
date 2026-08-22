@@ -1,5 +1,6 @@
 import json
 import struct
+from dataclasses import replace
 
 import numpy as np
 import pygltflib
@@ -84,6 +85,28 @@ def test_exports_valid_step_binary_stl_glb_preview_and_json(tmp_path):
     assert manifest.metrics.dimensions_mm == pytest.approx((10, 20, 30))
     assert manifest.preview_html == manifest.preview_path
     assert manifest.report_json == manifest.report_path
+
+
+def test_export_embeds_advisory_enrichment_without_changing_geometry(tmp_path):
+    enrichment = {
+        "status": "completed",
+        "provider": "openai",
+        "object_identity": {"common_name": "mounting bracket", "confidence": 0.7},
+        "source_urls": ["https://manufacturer.example/bracket"],
+        "warnings": ["Advisory only; geometry was not modified."],
+    }
+    baseline = _reconstruction()
+    manifest = artifacts_module.export_artifacts(
+        replace(baseline, enrichment=enrichment),
+        tmp_path,
+        stem="enriched",
+    )
+
+    report = json.loads(manifest.report_path.read_text(encoding="utf-8"))
+    assert manifest.enrichment == enrichment
+    assert report["enrichment"] == enrichment
+    assert manifest.metrics.dimensions_mm == pytest.approx((10, 20, 30))
+    assert len(load_step(manifest.step_path)) == 1
 
 
 def test_failed_staged_export_preserves_existing_artifacts(tmp_path, monkeypatch):

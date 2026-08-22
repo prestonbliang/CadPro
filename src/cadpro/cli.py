@@ -77,7 +77,7 @@ def web(
     port: int = typer.Option(8000, min=1, max=65535, help="Website port."),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the website after launch."),
 ) -> None:
-    """Launch the single-image profile-extrusion website."""
+    """Launch the photo, photo-orbit, and turntable-video reconstruction website."""
     import uvicorn
 
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host

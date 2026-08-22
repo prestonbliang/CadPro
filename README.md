@@ -1,39 +1,46 @@
 # CadPro
 
-CadPro turns exactly one clean object image into a validated, measured 2.5D CAD solid
-through a guided web application. Upload one image, enter the object's measured width,
-choose the extrusion depth, inspect the result, and download:
+CadPro turns a measured object capture into interoperable CAD and 3D files through a
+local web application. The website accepts exactly one of these capture types:
 
-- **STEP** for Onshape, Fusion, SolidWorks, FreeCAD, and other CAD systems
-- **STL** for Blender, slicers, and mesh workflows
-- **GLB** for Blender, web viewers, and real-time 3D tools
-- **JSON diagnostics** recording the inputs and verified geometry measurements
+- one object photo;
+- 20–50 ordered photos covering one complete revolution; or
+- one turntable video, sampled into 20–50 evenly spaced views.
 
-CadPro extracts the object's front-view silhouette, scales its horizontal span to the
-width you entered, and extrudes that profile uniformly to the chosen depth. The STEP
-output is a genuine OpenCascade boundary-representation solid. CadPro reloads every
-exported STEP and rejects it unless it contains exactly one valid volumetric solid. STL
-and GLB are included because Blender does not natively import STEP in a standard
-installation.
+Every successful job exports a validated **STEP** solid, binary **STL**, **GLB**, an
+interactive offline HTML preview, and a JSON reconstruction report. STEP is intended for
+Onshape, Fusion, SolidWorks, FreeCAD, and similar CAD systems. STL and GLB are included for
+Blender, slicers, web viewers, and mesh workflows.
 
-## Version 1.1 — single-image web workflow
+CadPro is measurement-driven reconstruction, not a magic recovery of hidden design intent.
+Read [Technical truth and limitations](#technical-truth-and-limitations) before using an
+output for engineering or manufacturing.
 
-- Responsive single-image upload studio
-- Exactly-one-file enforcement in the browser and API
-- Measured-width calibration and user-selected extrusion depth
-- Client- and server-side format, dimension, size, and scale checks
-- Private asynchronous reconstruction jobs with progress and actionable errors
-- Automatic background separation and silhouette extraction
-- Profile and visible-hole extraction with uniform-depth extrusion
-- OpenCascade validity, connected-solid, positive-volume, and STEP round-trip checks
-- Interactive offline 3D result preview
-- Atomic STEP, binary STL, GLB, HTML preview, and report generation
-- Opaque artifact download IDs; server filesystem paths are never sent to the browser
-- Bounded admission (one active reconstruction plus one queued upload by default)
-- 24-hour job expiry with periodic cleanup while running and cleanup at shutdown
-- Trusted Host, same-origin browser upload, and early multipart body-size enforcement
-- Docker packaging and health endpoint
-- Advanced command-line converters and `cad-diff` remain available
+## Version 2.0 capability contract
+
+| Website mode | Required input | Measurement | Geometry produced |
+| --- | --- | --- | --- |
+| One photo | Exactly one square-on object image | Real profile width and chosen depth | Measured 2.5D silhouette/profile extrusion |
+| Photo orbit | 20–50 ordered, evenly spaced photos | Real maximum width | Measurement-scaled silhouette visual hull |
+| Turntable video | Exactly one steady full-revolution video; choose 20–50 sampled views | Real maximum width | Measurement-scaled silhouette visual hull |
+
+The three modes share the same guarded job queue, isolated transient storage, progress UI,
+OpenCascade export pipeline, and artifact verification. A completed STEP file is reloaded and
+rejected unless it contains exactly one valid, connected, positive-volume solid. STL and GLB
+are validated as non-empty geometry before the result is published.
+
+Version 2.0 includes:
+
+- responsive one-photo, photo-orbit, and turntable-video workflows;
+- browser- and server-side file count, type, byte, pixel, and measurement limits;
+- order-preserving photo upload with sequential, memory-bounded thumbnail inspection;
+- configurable turntable direction and 20–50-view video sampling;
+- measured profile extrusion for one photo and silhouette intersection for full orbits;
+- optional OpenAI vision and cited web-reference research, kept separate from geometry;
+- private asynchronous jobs, opaque artifact IDs, expiry cleanup, and bounded admission;
+- Trusted Host, same-origin upload, and early multipart request-size enforcement;
+- STEP, STL, GLB, HTML preview, and JSON report generation;
+- Docker packaging, a health endpoint, command-line converters, and `cad-diff`.
 
 ## Install and launch
 
@@ -55,33 +62,122 @@ python3 -m venv .venv
 .venv/bin/cadpro web
 ```
 
-The website opens at `http://127.0.0.1:8000`. Use `cadpro web --no-open` when you do not
-want CadPro to open a browser automatically.
+Open `http://127.0.0.1:8000`. Use `cadpro web --no-open` when you do not want CadPro to
+open a browser automatically.
 
-## Single-image workflow
+## Capture and reconstruction workflows
+
+### One photo
 
 1. Put the object against a plain background that strongly contrasts with its outline.
-2. Photograph the profile square-on. Keep the entire object visible and away from every
-   image edge; minimize perspective by moving farther away and zooming in if practical.
-3. Select exactly one JPEG, PNG, WebP, or BMP image in the website.
-4. Enter the object's measured maximum horizontal width in millimeters.
-5. Choose the uniform extrusion depth you want in millimeters.
-6. Build the model, inspect the preview, and download the appropriate CAD or mesh format.
+2. Photograph the desired profile square-on, with the whole object clear of every edge.
+3. Choose **One photo** and select one JPEG, PNG, WebP, or BMP image.
+4. Enter the object's measured horizontal width and the uniform depth to extrude.
+5. Build, inspect the preview, download the files, and verify critical dimensions in CAD.
 
-Uploads are limited to 25 MiB, 12.5 million pixels total, and 8,192 pixels on either
-side so malformed or extreme images cannot exhaust reconstruction memory.
+CadPro extracts the visible outline and enclosed openings, scales the outline to the entered
+width, and extrudes it by the exact chosen depth. The depth is a design input, not something
+inferred from the image. A visible enclosed opening becomes a through-hole.
 
-The width is a real calibration measurement. The depth is a design input, not a value
-inferred from the photograph. For example, a 120 mm-wide bracket photographed from the
-front with an entered depth of 8 mm produces its measured front profile extruded exactly
-8 mm. A visible enclosed opening becomes a through-hole through that extrusion.
+### Ordered photo orbit
 
-This is intentionally a **2.5D profile extrusion**. One image cannot reveal the object's
-back, side-wall shape, changing depth, or hidden geometry. See
-[Technical truth and limitations](#technical-truth-and-limitations) before using an
-output for engineering or manufacturing.
+1. Fix the camera, zoom, focus, lighting, and a plain contrasting background.
+2. Keep the entire object in frame and rotate the object through exactly one revolution.
+3. Capture 20–50 evenly spaced photos with identical pixel dimensions.
+4. Choose **Photo orbit**, select the images in rotation order, and correct their order in the
+   thumbnail strip if needed.
+5. Enter the object's measured maximum width and the rotation direction as viewed from above.
 
-## Docker
+CadPro extracts one silhouette from each ordered view, scales the capture from the entered
+width, and intersects the view volumes into one visual hull. Photo order, even angular spacing,
+stable framing, and a stationary camera are part of the reconstruction contract.
+
+### Turntable video
+
+1. Fix the camera and record the object completing exactly one steady 360-degree turn.
+2. Avoid pauses, speed changes, camera motion, autofocus shifts, and cropped frames.
+3. Choose **Turntable video**, select one supported video, and choose 20–50 sampled views.
+4. Enter the object's measured maximum width and rotation direction.
+
+CadPro samples evenly spaced frames from the selected revolution and feeds their silhouettes
+through the same visual-hull reconstruction used by a photo orbit. More sampled views improve
+angular coverage but cannot reveal a feature that never changes an outside silhouette.
+
+Image files are limited to 25 MiB each, 12.5 million pixels, and 8,192 pixels on either edge.
+A photo set is limited to 500 MiB and a video to 2 GiB. Server settings can lower these byte
+limits. Measurements must be finite and greater than zero.
+
+## Optional AI and cited web enrichment
+
+CadPro can add an advisory research brief to a result. This is deliberately separate from the
+measurement-driven reconstruction and is off by default. To enable it on the server:
+
+```powershell
+$env:CADPRO_AI_ENRICHMENT = "1"
+$env:OPENAI_API_KEY = "your-api-key"
+# Optional provider model override:
+$env:CADPRO_AI_MODEL = "your-supported-model"
+.venv\Scripts\cadpro.exe web
+```
+
+On macOS/Linux, set the same environment variables with `export`. A user must also select the
+optional intelligence checkbox for an individual job. An API key by itself does not upload any
+capture.
+
+When requested, CadPro sends at most six bounded representative views to the OpenAI Responses
+API for vision analysis and allows cited web search. Images are resized and compressed before
+the request. The validated response can contain an object identity hypothesis, candidate
+dimensions, visible feature observations, uncertainties, and source URLs. Those findings are
+written into the job result and JSON report for human review.
+
+AI/web enrichment **never changes the measured width, extrusion depth, silhouettes, B-rep, or
+STEP output**. A visual estimate is not a measurement. A published dimension may belong to a
+different product revision. Check every cited source and confirm the photographed object before
+using any advisory information. If enrichment is disabled or fails, local reconstruction still
+continues.
+
+Enabling this feature sends representative images and the optional object hint to an external
+provider. Review your provider's privacy, retention, regional-processing, and billing terms
+before enabling it for confidential objects.
+
+## Optional Hunyuan-compatible concept mesh worker
+
+`src/cadpro/ml_mesh.py` contains an opt-in integration seam for an administrator-operated,
+Hunyuan-compatible image-to-3D worker. When the worker is available, a website user can request
+an additional concept GLB alongside the normal validated exports. Concept generation remains a
+separate companion path and never changes or replaces the STEP reconstruction. The worker must
+expose `POST /generate`, accept one bounded base64 JPEG in JSON, and return a self-contained
+binary glTF 2.0 file.
+
+The client contract follows Tencent's official
+[Hunyuan3D-2 API server](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) pattern. Run the exact
+worker/model version you have reviewed as a separate GPU service; pin its revision and follow
+that repository's installation, hardware, and license instructions. If a newer worker such as
+[Hunyuan3D-2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) exposes a different response,
+put a small adapter in front of it that preserves the contract above.
+
+Configure it with:
+
+```powershell
+$env:CADPRO_ML_MESH_ENABLED = "1"
+$env:CADPRO_ML_MESH_LICENSE_ACCEPTED = "1"
+$env:CADPRO_ML_MESH_ENDPOINT = "https://your-worker.example/generate"
+# Optional server-owned bearer token:
+$env:CADPRO_ML_MESH_TOKEN = "your-worker-token"
+```
+
+Only enable this after reviewing and explicitly accepting the exact model, weights, code, and
+deployment licenses used by your worker. CadPro does not bundle, endorse, or silently accept a
+third-party model license. A user must also select **High-detail AI concept mesh** for an
+individual job; configuring the worker does not send every capture automatically.
+
+The returned `cadpro-ai-concept.glb` is a **non-metric visual concept mesh**. It is not derived
+from the validated STEP solid, is not manufacturing CAD, and is never converted or presented as
+STEP. Treat it as a visual reference for Blender or a manual remodeling workflow. The module
+validates the GLB container and embedded position geometry, but that does not establish scale,
+dimensional accuracy, watertightness, topology quality, or manufacturability.
+
+## Docker and network safety
 
 ```bash
 docker build -t cadpro .
@@ -90,32 +186,27 @@ docker run --rm -p 127.0.0.1:8000:8000 \
   cadpro
 ```
 
-The explicit `127.0.0.1` publish address keeps the container reachable only from the local
-machine. `CADPRO_PUBLIC_ORIGIN` supplies social-preview URLs and the permitted browser
-upload origin; its hostname is also trusted for the HTTP `Host` header. Loopback hosts are
-always trusted. For a reverse proxy with another internal host, add a comma-separated
-`CADPRO_TRUSTED_HOSTS` value and configure the proxy to preserve the public Host. The image
-does not trust forwarded headers by default.
+The explicit loopback publish address keeps the container reachable only from the local
+machine. `CADPRO_PUBLIC_ORIGIN` supplies social-preview URLs and the permitted browser upload
+origin; its hostname is also trusted for the HTTP `Host` header. Loopback hosts are always
+trusted. For a reverse proxy, set `CADPRO_TRUSTED_HOSTS` to the necessary comma-separated hosts
+and preserve the public Host header. Forwarded headers are not trusted by default.
 
-The service has no user accounts. Keep it on localhost, or place it behind authentication,
-TLS, and network-level upload/rate limits before exposing it to the public internet. The
-application itself admits at most two unfinished jobs by default, preventing an unbounded
-reconstruction queue.
+The service has no user accounts. Keep it on localhost, or place it behind authentication, TLS,
+network-level upload/rate limits, and appropriate external-provider controls before public use.
+The default application admission limit allows one active reconstruction plus one queued job,
+preventing an unbounded reconstruction queue. Job data expires after 24 hours by default.
 
-## Advanced command-line workflows
+## Command-line tools
 
-The website accepts one still image only. The lower-level commands below remain available
-for existing scripts and experiments; they are separate from the website's single-image
-workflow.
-
-Profile-extrude one image (or the clearest frame selected from a normal video by the
-legacy media converter):
+Create a profile extrusion from an image (or the clearest frame selected from a normal video by
+the legacy media converter):
 
 ```powershell
 .venv\Scripts\cadpro.exe convert bracket.png --width-mm 120 --depth-mm 8 -o bracket.step
 ```
 
-Run the experimental visual-hull converter on a complete turntable video:
+Run the lower-level experimental turntable converter:
 
 ```powershell
 .venv\Scripts\cadpro.exe turntable part.mp4 --width-mm 75 --views 24 -o part.step
@@ -127,81 +218,74 @@ Compare two existing STEP files:
 .venv\Scripts\cad-diff.exe old.step new.step --html diff.html
 ```
 
-## STEP comparison and real-world validation
+The CLI turntable command is retained for scripts and has its own legacy sampling range. The
+website capability contract is 20–50 views.
 
-The included `cad-diff` tool provides semantic version control for mechanical CAD: it
-reports which solids and faces changed instead of treating two STEP files as unrelated
-binary blobs.
+## STEP comparison
 
-- **Tier 0** matches whole solids by volume, surface area, center of mass, and bounding
-  box, while tolerating assembly reordering and rejecting implausible matches.
-- **Tiers 1–4** match faces by analytic surface type, adjacency, and residual subgraph
-  structure. Matched analytic faces report dimensional changes such as
-  `radius: +2.000`.
-- **Tier 5** independently cross-checks added and removed volume with OpenCascade boolean
-  operations. A cross-check is reported only when the resulting shapes pass geometric
-  validity checks.
-- `--html out.html` creates a self-contained, offline 3D report with unchanged, modified,
-  added, and removed geometry shown as separate color-coded layers.
+The included `cad-diff` tool provides semantic version control for mechanical CAD. It matches
+solids and faces using volume, surface area, center of mass, bounding boxes, analytic surface
+types, adjacency, and residual topology, then independently checks added and removed volume with
+OpenCascade booleans. `--html out.html` creates a self-contained offline 3D report.
 
-The bundled `examples/real_world/` corpus covers SolidWorks 2014 and Fusion 360 exports,
-including assemblies, schema changes, free-form `BSplineSurface` faces, and localized
-edits. See `examples/real_world/NOTICE.md` for provenance and licensing. It exposed and
-helped fix assembly-leaf traversal, overly permissive solid matching, and a failure mode
-where a boolean operation claimed success but returned invalid geometry.
-
-Observed regression results on that corpus include:
-
-- Re-exporting one three-part SolidWorks assembly from AP203 to AP214 reports all three
-  parts unchanged, with no false positives from schema noise.
-- Cutting a 0.3 mm hole in a 54-face housing remains localized to one added and two
-  modified faces; its free-form antenna faces still match without invented dimensions.
-- A 7 MB, four-part, 1,700+-face SolidWorks assembly loaded in about five seconds. Its
-  811-face PCB self-diff completed in 0.33 seconds, including a 671×671 plane-face
-  assignment.
-- An invalid Fusion 360 boolean result that overstated an approximately 4 mm³ edit as
-  thousands of cubic millimeters is now rejected instead of presented as ground truth.
-
-These are measured development results, not universal performance guarantees. Coverage
-still does not include NX, Creo, or CATIA exports. An additional licensed or private
-vendor corpus can be exercised through `CAD_DIFF_CORPUS`; its manifest format and test
-command are documented in `docs/external-corpus.md`.
+The bundled `examples/real_world/` corpus includes licensed SolidWorks and Fusion 360 exports.
+See `examples/real_world/NOTICE.md` for provenance and `docs/external-corpus.md` for the optional
+external corpus format.
 
 ## Technical truth and limitations
 
-The website creates a **measured 2.5D profile extrusion**, not a full 3D reconstruction
-and not a native parametric feature history. Its front outline and any visible enclosed
-holes come from the image. The horizontal scale comes from the measured width you enter,
-and every point is extruded by the exact depth you choose.
+CadPro outputs one valid boundary-representation solid, but that does not mean the solid is an
+exact copy of the original object or a native parametric feature-history model.
 
-A single image cannot infer:
+One-photo mode cannot determine:
 
-- the true depth, backside outline, or rear-face features
-- pockets, steps, bosses, side holes, or other changes along the extrusion direction
-- hidden cavities, internal structure, or features obscured in the photograph
-- exact design intent such as a nominal radius, thread, tolerance, or material
+- the true depth, backside outline, or rear-face features;
+- pockets, steps, bosses, side holes, or other depth changes;
+- hidden cavities, internal structure, threads, tolerances, or material; or
+- whether a visible opening is a through-hole or a blind pocket.
 
-Perspective, lens distortion, reflections, transparency, shadows joined to the object,
-blur, low contrast, and very thin features reduce profile accuracy. A visible opening is
-treated as a through-hole; CadPro cannot know whether it is actually blind. No software
-can recover geometry that one view never observes, so verify critical dimensions and add
-missing features in CAD before manufacturing.
+Photo-orbit and video modes add outside shape coverage, but a silhouette visual hull still
+cannot recover concavities, cavities, holes, or recesses that never affect an outline. It can
+also overfill space between visible limbs or features. It is not texture-based photogrammetry,
+neural radiance-field reconstruction, or native editable design history.
 
-The advanced turntable CLI builds a visual hull from multiple silhouettes and has
-different capture requirements, but it still cannot recover concavities or hidden
-structure that never affect a silhouette.
+Every mode is sensitive to perspective, lens distortion, reflections, transparency, shadows
+connected to the object, blur, low contrast, thin features, changing zoom, bad photo order, and
+an incorrect real-world width. The visual hull assumes a centered object, fixed camera, even
+angular spacing, and one complete revolution.
 
-## Development
+Before manufacturing:
+
+1. inspect the preview and reconstruction report;
+2. import STEP into a trusted CAD system and run its geometry checks;
+3. measure overall dimensions, holes, interfaces, wall thicknesses, and hidden features;
+4. remodel missing design intent and add tolerances, threads, and material requirements; and
+5. validate the final edited design against the physical object and its intended load case.
+
+Do not use inferred or advisory dimensions for safety-critical parts without independent
+measurement and qualified engineering review.
+
+## Development and testing
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
+The end-to-end suite builds actual one-photo, 20-photo, and turntable-video reconstructions,
+downloads every artifact, and reloads the generated STEP solids.
+
 ```text
-src/cadpro/web.py          single-image API, job queue, artifact security, website serving
-src/cadpro/web_assets/     responsive single-image profile-extrusion interface
-src/cadpro/reconstruct.py  advanced ordered-photo and sampled-video reconstruction
+src/cadpro/web.py          three-mode API, job queue, request guards, artifact security
+src/cadpro/web_assets/     responsive capture, calibration, progress, and result interface
+src/cadpro/reconstruct.py  profile extrusion and ordered silhouette visual-hull reconstruction
+src/cadpro/enrichment.py   optional OpenAI vision and cited web-reference report enrichment
+src/cadpro/ml_mesh.py      optional external concept-mesh worker client and GLB validation
 src/cadpro/artifacts.py    STEP/STL/GLB/preview/report export and verification
-src/cadpro/media.py        decoding, segmentation, and contour extraction
-src/cadpro/step.py         B-rep construction and visual-hull booleans
+src/cadpro/media.py        decoding, frame sampling, segmentation, and contour extraction
+src/cadpro/step.py         OpenCascade B-rep construction and visual-hull booleans
 ```
+
+## Contributors
+
+- Preston L
+- Ethan C (`yil91974@gmail.com`)

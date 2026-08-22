@@ -35,12 +35,11 @@ def test_convert_command_writes_step(tmp_path):
     assert "60 x 3 mm" in result.output
 
 
-def test_web_help_describes_the_single_image_workflow():
+def test_web_help_describes_all_website_capture_modes():
     result = CliRunner().invoke(app, ["web", "--help"])
 
     assert result.exit_code == 0, result.output
-    assert "single-image profile-extrusion website" in result.output
-    assert "photo/video" not in result.output.lower()
+    assert "photo, photo-orbit, and turntable-video reconstruction website" in result.output
 
 
 def test_convert_command_reports_unsupported_media(tmp_path):

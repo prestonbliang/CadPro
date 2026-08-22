@@ -97,12 +97,9 @@ def silhouettes_from_turntable_video(
 
 def extract_silhouette(image: np.ndarray, frame_index: int | None = None) -> Silhouette:
     """Extract the largest foreground region and its holes from an image."""
-    if image.ndim not in (2, 3):
-        raise ValueError("Expected a grayscale, RGB, or RGBA image")
-    height, width = image.shape[:2]
+    width, height = validated_frame_dimensions(image)
     if min(height, width) < 8:
         raise ValueError("Image is too small; use at least 8 x 8 pixels")
-    _validate_image_size(width, height)
 
     mask = _foreground_mask(image)
     contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -134,7 +131,7 @@ def validated_image_size(path: str | Path) -> tuple[int, int]:
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(source) as image:
                 width, height = (int(value) for value in image.size)
-                _validate_image_size(width, height)
+                validated_image_dimensions(width, height)
                 image.verify()
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
         raise ValueError(_image_limit_message()) from error
@@ -143,11 +140,28 @@ def validated_image_size(path: str | Path) -> tuple[int, int]:
     return width, height
 
 
-def _validate_image_size(width: int, height: int) -> None:
+def validated_image_dimensions(width: int, height: int) -> tuple[int, int]:
+    """Validate decoded or metadata pixel dimensions against shared safety bounds."""
+    if (
+        isinstance(width, bool)
+        or not isinstance(width, int)
+        or isinstance(height, bool)
+        or not isinstance(height, int)
+    ):
+        raise ValueError("Image dimensions must be integers")
     if width <= 0 or height <= 0:
         raise ValueError("Image dimensions must be positive")
     if width > MAX_IMAGE_EDGE or height > MAX_IMAGE_EDGE or width * height > MAX_IMAGE_PIXELS:
         raise ValueError(_image_limit_message())
+    return width, height
+
+
+def validated_frame_dimensions(image: np.ndarray) -> tuple[int, int]:
+    """Validate a decoded frame before segmentation or secondary encoding."""
+    if not isinstance(image, np.ndarray) or image.ndim not in (2, 3):
+        raise ValueError("Expected a grayscale, RGB, or RGBA image")
+    height, width = image.shape[:2]
+    return validated_image_dimensions(int(width), int(height))
 
 
 def _image_limit_message() -> str:

@@ -53,6 +53,7 @@ class ArtifactManifest:
     report_path: Path
     metrics: GeometryMetrics
     input_diagnostics: tuple[InputDiagnostic, ...]
+    enrichment: dict[str, object] | None
 
     @property
     def step(self) -> Path:
@@ -166,6 +167,7 @@ def export_artifacts(
         report_path=destinations["report"],
         metrics=metrics,
         input_diagnostics=diagnostics,
+        enrichment=(dict(reconstruction.enrichment) if reconstruction.enrichment else None),
     )
 
 
@@ -247,7 +249,7 @@ def _report_document(
     staged: dict[str, Path],
     destinations: dict[str, Path],
 ) -> dict[str, object]:
-    return {
+    report: dict[str, object] = {
         "schema_version": 1,
         "reconstruction": {
             "mode": reconstruction.mode,
@@ -283,6 +285,9 @@ def _report_document(
             for name in ("step", "stl", "glb", "preview", "report")
         },
     }
+    if reconstruction.enrichment:
+        report["enrichment"] = dict(reconstruction.enrichment)
+    return report
 
 
 def _validate_staged_files(staged: dict[str, Path]) -> None:

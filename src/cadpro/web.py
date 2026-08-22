@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import math
 import mimetypes
 import os
@@ -20,7 +21,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -33,15 +34,30 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from cadpro import __version__
-from cadpro.media import MAX_IMAGE_EDGE, MAX_IMAGE_PIXELS, validated_image_size
+from cadpro.enrichment import EnrichmentConfig, sanitize_query
+from cadpro.media import (
+    MAX_IMAGE_EDGE,
+    MAX_IMAGE_PIXELS,
+    validated_frame_dimensions,
+    validated_image_dimensions,
+    validated_image_size,
+)
+from cadpro.ml_mesh import ConceptMeshConfig
 
 
+MIN_PHOTOS = 20
+MAX_PHOTOS = 50
+MIN_VIDEO_VIEWS = 20
+MAX_VIDEO_VIEWS = 50
 DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024
+DEFAULT_MAX_PHOTO_SET_BYTES = 500 * 1024 * 1024
+DEFAULT_MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_JOB_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_JOB_SWEEP_SECONDS = 60.0
 DEFAULT_MAX_PENDING_JOBS = 2
 DEFAULT_PUBLIC_ORIGIN = "http://127.0.0.1:8000"
 DEFAULT_REQUEST_OVERHEAD_BYTES = 2 * 1024 * 1024
+RESEARCH_FRAME_MAX_EDGE = 1_024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_WIDTH_MM = 1_000_000.0
 
@@ -64,6 +80,22 @@ _IMAGE_CONTENT_TYPES = {
     "tiff": {"image/tiff"},
     "webp": {"image/webp"},
 }
+_VIDEO_SUFFIX_KIND = {
+    ".avi": "avi",
+    ".m4v": "iso-media",
+    ".mkv": "ebml",
+    ".mov": "iso-media",
+    ".mp4": "iso-media",
+    ".webm": "ebml",
+}
+_VIDEO_CONTENT_TYPES = {
+    ".avi": {"video/x-msvideo", "video/avi"},
+    ".m4v": {"video/x-m4v", "video/mp4"},
+    ".mkv": {"video/x-matroska", "video/mkv"},
+    ".mov": {"video/quicktime"},
+    ".mp4": {"video/mp4"},
+    ".webm": {"video/webm"},
+}
 _GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
 _ARTIFACT_SUFFIXES = {
     ".glb",
@@ -84,12 +116,14 @@ _SAFE_ARTIFACT_ID = re.compile(r"[^a-z0-9]+")
 _STAGE_ORDER = {
     "queued": 0,
     "upload": 1,
-    "segment": 2,
-    "reconstruct": 3,
-    "export": 4,
-    "complete": 5,
+    "research": 2,
+    "segment": 3,
+    "reconstruct": 4,
+    "export": 5,
+    "complete": 6,
 }
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_UPLOAD_RESERVATION_SCOPE_KEY = "cadpro.upload_reservation"
 
 
 class ApiError(Exception):
@@ -122,7 +156,7 @@ class Artifact:
 @dataclass
 class Job:
     job_id: UUID
-    kind: Literal["image"]
+    kind: Literal["image", "photos", "video"]
     root: Path
     input_dir: Path
     output_dir: Path
@@ -131,7 +165,9 @@ class Job:
     created_at: datetime
     created_monotonic: float
     status: Literal["queued", "running", "completed", "failed"] = "queued"
-    stage: Literal["queued", "upload", "segment", "reconstruct", "export", "complete"] = "queued"
+    stage: Literal[
+        "queued", "upload", "research", "segment", "reconstruct", "export", "complete"
+    ] = "queued"
     progress: int = 10
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -139,6 +175,8 @@ class Job:
     artifacts: dict[str, Artifact] | None = None
     metrics: dict[str, Any] | None = None
     input_diagnostics: list[dict[str, Any]] | None = None
+    enrichment: dict[str, Any] | None = None
+    concept_mesh: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     future: Future[None] | None = None
     _state_lock: threading.RLock = field(
@@ -150,7 +188,9 @@ class Job:
 
     def advance(
         self,
-        stage: Literal["queued", "upload", "segment", "reconstruct", "export", "complete"],
+        stage: Literal[
+            "queued", "upload", "research", "segment", "reconstruct", "export", "complete"
+        ],
         progress: int,
     ) -> bool:
         """Advance visible work state without ever allowing a concurrent regression."""
@@ -174,6 +214,15 @@ class StagedJob:
     root: Path
     input_dir: Path
     output_dir: Path
+
+
+@dataclass(frozen=True)
+class JobManifest:
+    """Combine validated CAD exports with optional supplemental job artifacts."""
+
+    cad: object
+    concept_mesh_path: Path | None = None
+    concept_mesh: Mapping[str, Any] | None = None
 
 
 ReconstructionRunner = Callable[[Job], object]
@@ -200,6 +249,7 @@ class JobManager:
         self._lock = threading.RLock()
         self._jobs: dict[UUID, Job] = {}
         self._staged: set[UUID] = set()
+        self._upload_reservations: set[UUID] = set()
         self._accepting = True
         self._runner = runner
         self._retention_seconds = retention_seconds
@@ -227,14 +277,37 @@ class JobManager:
         """Return whether another upload can be admitted without growing an unbounded queue."""
         with self._lock:
             self._prune_locked()
-            return self._accepting and self._pending_count_locked() < self._max_pending_jobs
+            return self._accepting and self._admitted_count_locked() < self._max_pending_jobs
 
-    def stage(self) -> StagedJob:
+    def reserve_upload(self) -> UUID | None:
+        """Reserve queue capacity before FastAPI parses and spools a multipart body."""
+        with self._lock:
+            self._prune_locked()
+            if not self._accepting or self._admitted_count_locked() >= self._max_pending_jobs:
+                return None
+            reservation = uuid4()
+            self._upload_reservations.add(reservation)
+            return reservation
+
+    def release_upload(self, reservation: UUID) -> None:
+        """Release an unconsumed upload reservation; consuming twice is harmless."""
+        with self._lock:
+            self._upload_reservations.discard(reservation)
+
+    def stage(self, *, upload_reservation: UUID | None = None) -> StagedJob:
         with self._lock:
             if not self._accepting:
                 raise ApiError(503, "service_stopping", "The reconstruction service is stopping.")
             self._prune_locked()
-            if self._pending_count_locked() >= self._max_pending_jobs:
+            if upload_reservation is not None:
+                if upload_reservation not in self._upload_reservations:
+                    raise ApiError(
+                        409,
+                        "invalid_upload_reservation",
+                        "The upload admission reservation is no longer active.",
+                    )
+                self._upload_reservations.remove(upload_reservation)
+            elif self._admitted_count_locked() >= self._max_pending_jobs:
                 raise ApiError(
                     503,
                     "job_queue_full",
@@ -264,7 +337,7 @@ class JobManager:
         self,
         stage: StagedJob,
         *,
-        kind: Literal["image"],
+        kind: Literal["image", "photos", "video"],
         input_paths: Sequence[Path],
         parameters: Mapping[str, Any],
     ) -> Job:
@@ -326,6 +399,8 @@ class JobManager:
                         ],
                         "metrics": dict(job.metrics or {}),
                         "input_diagnostics": list(job.input_diagnostics or []),
+                        "enrichment": dict(job.enrichment) if job.enrichment else None,
+                        "concept_mesh": dict(job.concept_mesh) if job.concept_mesh else None,
                     }
                 return {
                     "id": str(job.job_id),
@@ -381,6 +456,7 @@ class JobManager:
         with self._lock:
             self._jobs.clear()
             self._staged.clear()
+            self._upload_reservations.clear()
         shutil.rmtree(self.root, ignore_errors=True)
         if self._temporary is not None:
             self._temporary.cleanup()
@@ -393,12 +469,12 @@ class JobManager:
             with job._state_lock:
                 job.status = "running"
                 job.started_at = datetime.now(timezone.utc)
-            job.advance("segment", 30)
+            job.advance("upload", 15)
         try:
             manifest = self._runner(job)
             job.advance("export", 90)
             artifacts = _register_artifacts(manifest, job.output_dir)
-            metrics, input_diagnostics = _result_metadata(manifest)
+            metrics, input_diagnostics, enrichment, concept_mesh = _result_metadata(manifest)
             if not artifacts:
                 raise RuntimeError("Reconstruction did not produce any downloadable artifacts.")
         except Exception as error:  # The worker must always reach a terminal state.
@@ -418,6 +494,8 @@ class JobManager:
                 job.artifacts = artifacts
                 job.metrics = metrics
                 job.input_diagnostics = input_diagnostics
+                job.enrichment = enrichment
+                job.concept_mesh = concept_mesh
                 job.status = "completed"
                 job.advance("complete", 100)
                 job.finished_at = datetime.now(timezone.utc)
@@ -427,6 +505,9 @@ class JobManager:
         return len(self._staged) + sum(
             job.status not in _TERMINAL_STATUSES for job in self._jobs.values()
         )
+
+    def _admitted_count_locked(self) -> int:
+        return self._pending_count_locked() + len(self._upload_reservations)
 
     def _sweep_loop(self) -> None:
         while not self._sweep_stop.wait(self._sweep_interval_seconds):
@@ -453,17 +534,251 @@ class JobManager:
 def _run_reconstruction(job: Job) -> object:
     """The one integration seam between the web queue and reconstruction engine."""
     from cadpro.artifacts import export_artifacts
-    from cadpro.reconstruct import reconstruct_single_image
-
-    job.advance("segment", 30)
-    reconstruction = reconstruct_single_image(
-        job.input_paths[0],
-        width_mm=job.parameters["width_mm"],
-        depth_mm=job.parameters["depth_mm"],
-        on_profile_ready=lambda: job.advance("reconstruct", 65),
+    from cadpro.enrichment import (
+        EnrichmentConfig,
+        EnrichmentError,
+        EnrichmentReport,
+        enrich_references,
+        sanitize_query,
     )
-    job.advance("export", 85)
-    return export_artifacts(reconstruction, job.output_dir, stem="cadpro-model")
+    from cadpro.ml_mesh import (
+        ConceptMeshConfig,
+        ConceptMeshError,
+        generate_concept_mesh,
+    )
+    from cadpro.reconstruct import (
+        reconstruct_photo_set,
+        reconstruct_single_image,
+        reconstruct_turntable_video,
+    )
+
+    enrichment: dict[str, Any] | None = None
+    concept_mesh: dict[str, Any] | None = None
+    concept_mesh_path: Path | None = None
+    optional_requested = bool(
+        job.parameters.get("ai_enhance") or job.parameters.get("concept_mesh")
+    )
+    reference_images: tuple[Path, ...] | None = None
+    reference_error: str | None = None
+    if optional_requested:
+        job.advance("research", 22)
+
+        try:
+            reference_images = _representative_image_paths(job)
+        except Exception:
+            reference_error = "Representative views could not be prepared for optional AI processing."
+
+    if job.parameters.get("ai_enhance"):
+        query = sanitize_query(str(job.parameters.get("object_hint", "")))
+        if reference_images is None:
+            enrichment = EnrichmentReport.failed(
+                reference_error or "AI reference views were unavailable.",
+                query,
+            ).to_dict()
+        else:
+            try:
+                enrichment = enrich_references(
+                    reference_images,
+                    query,
+                    config=EnrichmentConfig.from_env(),
+                ).to_dict()
+            except EnrichmentError as error:
+                enrichment = EnrichmentReport.failed(str(error), query).to_dict()
+            except Exception:
+                enrichment = EnrichmentReport.failed(
+                    "AI/web reference enrichment failed; local reconstruction continued.",
+                    query,
+                ).to_dict()
+
+    job.advance("segment", 35)
+    if job.kind == "image":
+        reconstruction = reconstruct_single_image(
+            job.input_paths[0],
+            width_mm=job.parameters["width_mm"],
+            depth_mm=job.parameters["depth_mm"],
+            on_profile_ready=lambda: job.advance("reconstruct", 68),
+        )
+    elif job.kind == "photos":
+        reconstruction = reconstruct_photo_set(
+            job.input_paths,
+            width_mm=job.parameters["width_mm"],
+            clockwise=job.parameters["clockwise"],
+        )
+    else:
+        reconstruction = reconstruct_turntable_video(
+            job.input_paths[0],
+            width_mm=job.parameters["width_mm"],
+            views=job.parameters["views"],
+            start_frame=job.parameters["start_frame"],
+            end_frame=job.parameters["end_frame"],
+            clockwise=job.parameters["clockwise"],
+        )
+    if enrichment is not None:
+        reconstruction = replace(reconstruction, enrichment=enrichment)
+    job.advance("reconstruct", 68)
+    job.advance("export", 86)
+    cad_manifest = export_artifacts(reconstruction, job.output_dir, stem="cadpro-model")
+
+    if job.parameters.get("concept_mesh"):
+        job.advance("export", 94)
+        if reference_images is None:
+            concept_mesh = _failed_concept_mesh_metadata(
+                reference_error or "A representative image was unavailable."
+            )
+        else:
+            try:
+                generated = generate_concept_mesh(
+                    reference_images[0],
+                    job.output_dir,
+                    config=ConceptMeshConfig.from_env(),
+                )
+                concept_mesh_path = generated.glb_path
+                concept_mesh = {
+                    "status": generated.status,
+                    **dict(generated.metadata),
+                    "input_strategy": "representative_view",
+                    "source_name": job.input_paths[0].name,
+                    "warnings": list(generated.warnings),
+                }
+            except ConceptMeshError as error:
+                concept_mesh = _failed_concept_mesh_metadata(str(error))
+            except Exception:
+                concept_mesh = _failed_concept_mesh_metadata(
+                    "Concept-mesh generation failed; validated CAD exports are still available."
+                )
+
+        try:
+            _append_concept_mesh_report(
+                cad_manifest.report_path,
+                concept_mesh,
+                concept_mesh_path,
+            )
+        except Exception:
+            concept_mesh.setdefault("warnings", []).append(
+                "Concept-mesh status could not be appended to the downloadable JSON report."
+            )
+
+    return JobManifest(
+        cad=cad_manifest,
+        concept_mesh_path=concept_mesh_path,
+        concept_mesh=concept_mesh,
+    )
+
+
+def _failed_concept_mesh_metadata(warning: str) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "provider": "hunyuan-compatible-worker",
+        "artifact_kind": "ai_concept_mesh",
+        "format": "glb",
+        "metric_scale": False,
+        "manufacturing_cad": False,
+        "derived_from_step": False,
+        "input_strategy": "representative_view",
+        "warnings": [warning],
+    }
+
+
+def _append_concept_mesh_report(
+    report_path: Path,
+    metadata: Mapping[str, Any],
+    artifact_path: Path | None,
+) -> None:
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("CAD report root must be an object")
+    document["concept_mesh"] = dict(metadata)
+    if artifact_path is not None:
+        artifacts = document.setdefault("artifacts", {})
+        if isinstance(artifacts, dict):
+            artifacts["concept_mesh"] = {
+                "file": artifact_path.name,
+                "bytes": artifact_path.stat().st_size,
+            }
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".cadpro-report-",
+        suffix=".json",
+        dir=report_path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(document, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, report_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _representative_image_paths(job: Job, maximum: int = 6) -> tuple[Path, ...]:
+    """Return bounded still images for optional AI work, sampling video if needed."""
+    if job.kind != "video":
+        return job.input_paths
+
+    import cv2
+
+    source = job.input_paths[0]
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise ValueError("The video could not be decoded for optional AI processing.")
+    try:
+        try:
+            reported_size = validated_image_dimensions(
+                int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            )
+        except (OverflowError, ValueError) as error:
+            raise ValueError(
+                f"Video frame metadata is outside the image safety limits: {error}"
+            ) from error
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        start = int(job.parameters.get("start_frame", 0))
+        configured_end = job.parameters.get("end_frame")
+        stop = frame_count if configured_end is None else int(configured_end)
+        if frame_count <= 0 or start < 0 or stop <= start or stop > frame_count:
+            raise ValueError("The selected video range is invalid for optional AI analysis.")
+        sample_count = min(maximum, stop - start)
+        indices = tuple(start + (index * (stop - start)) // sample_count for index in range(sample_count))
+        destination_dir = job.input_dir / "research-frames"
+        destination_dir.mkdir(parents=False, exist_ok=False)
+        paths: list[Path] = []
+        for order, frame_index in enumerate(indices):
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise ValueError("A representative video frame could not be decoded for AI analysis.")
+            try:
+                decoded_size = validated_frame_dimensions(frame)
+            except ValueError as error:
+                raise ValueError(
+                    f"Video frame {frame_index} is outside the image safety limits: {error}"
+                ) from error
+            if decoded_size != reported_size:
+                raise ValueError(
+                    f"Video frame {frame_index} dimensions changed from "
+                    f"{reported_size[0]} x {reported_size[1]} to "
+                    f"{decoded_size[0]} x {decoded_size[1]}"
+                )
+            maximum_edge = max(decoded_size)
+            if maximum_edge > RESEARCH_FRAME_MAX_EDGE:
+                scale = RESEARCH_FRAME_MAX_EDGE / maximum_edge
+                frame = cv2.resize(
+                    frame,
+                    (
+                        max(1, round(decoded_size[0] * scale)),
+                        max(1, round(decoded_size[1] * scale)),
+                    ),
+                    interpolation=cv2.INTER_AREA,
+                )
+            destination = destination_dir / f"frame-{order:02d}.jpg"
+            if not cv2.imwrite(str(destination), frame, [cv2.IMWRITE_JPEG_QUALITY, 86]):
+                raise RuntimeError("A representative video frame could not be prepared for AI analysis.")
+            paths.append(destination)
+        return tuple(paths)
+    finally:
+        capture.release()
 
 
 class RequestGuardMiddleware:
@@ -476,11 +791,17 @@ class RequestGuardMiddleware:
         public_origin: str,
         trusted_hosts: Sequence[str],
         image_request_bytes: int,
+        photo_request_bytes: int,
+        video_request_bytes: int,
     ) -> None:
         self.app = app
         self._public_origin = _canonical_origin(public_origin)
         self._trusted_hosts = frozenset(host.lower().rstrip(".") for host in trusted_hosts)
-        self._request_limits = {"/api/jobs/image": image_request_bytes}
+        self._request_limits = {
+            "/api/jobs/image": image_request_bytes,
+            "/api/jobs/photos": photo_request_bytes,
+            "/api/jobs/video": video_request_bytes,
+        }
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -538,14 +859,18 @@ class RequestGuardMiddleware:
 
         manager = getattr(scope.get("app", object()), "state", None)
         manager = getattr(manager, "job_manager", None)
-        if manager is not None and not manager.has_capacity():
-            await _guard_error(
-                503,
-                "job_queue_full",
-                "CadPro is already processing the maximum number of jobs. Try again shortly.",
-                headers={"Retry-After": "5"},
-            )(scope, receive, send)
-            return
+        reservation: UUID | None = None
+        if manager is not None:
+            reservation = manager.reserve_upload()
+            if reservation is None:
+                await _guard_error(
+                    503,
+                    "job_queue_full",
+                    "CadPro is already processing the maximum number of jobs. Try again shortly.",
+                    headers={"Retry-After": "5"},
+                )(scope, receive, send)
+                return
+            scope[_UPLOAD_RESERVATION_SCOPE_KEY] = reservation
 
         received_bytes = 0
         body_too_large = False
@@ -572,24 +897,29 @@ class RequestGuardMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, limited_receive, tracked_send)
-        except _RequestBodyTooLarge:
-            if response_started:
-                raise
-            await _guard_error(
-                413,
-                "request_too_large",
-                f"The multipart request may not exceed {_format_bytes(request_limit)}.",
-                details={"maximum_bytes": request_limit},
-            )(scope, receive, send)
-            return
-        if body_too_large:
-            await _guard_error(
-                413,
-                "request_too_large",
-                f"The multipart request may not exceed {_format_bytes(request_limit)}.",
-                details={"maximum_bytes": request_limit},
-            )(scope, receive, send)
+            try:
+                await self.app(scope, limited_receive, tracked_send)
+            except _RequestBodyTooLarge:
+                if response_started:
+                    raise
+                await _guard_error(
+                    413,
+                    "request_too_large",
+                    f"The multipart request may not exceed {_format_bytes(request_limit)}.",
+                    details={"maximum_bytes": request_limit},
+                )(scope, receive, send)
+                return
+            if body_too_large:
+                await _guard_error(
+                    413,
+                    "request_too_large",
+                    f"The multipart request may not exceed {_format_bytes(request_limit)}.",
+                    details={"maximum_bytes": request_limit},
+                )(scope, receive, send)
+        finally:
+            if manager is not None and reservation is not None:
+                manager.release_upload(reservation)
+                scope.pop(_UPLOAD_RESERVATION_SCOPE_KEY, None)
 
 
 def create_app(
@@ -598,6 +928,8 @@ def create_app(
     asset_dir: str | Path | None = None,
     reconstruction_runner: ReconstructionRunner | None = None,
     max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+    max_photo_set_bytes: int = DEFAULT_MAX_PHOTO_SET_BYTES,
+    max_video_bytes: int = DEFAULT_MAX_VIDEO_BYTES,
     job_retention_seconds: float = DEFAULT_JOB_TTL_SECONDS,
     job_sweep_interval_seconds: float = DEFAULT_JOB_SWEEP_SECONDS,
     max_pending_jobs: int = DEFAULT_MAX_PENDING_JOBS,
@@ -605,8 +937,13 @@ def create_app(
     trusted_hosts: Sequence[str] | None = None,
 ) -> FastAPI:
     """Build the application; injectable limits and runner keep API tests lightweight."""
-    if max_image_bytes <= 0:
-        raise ValueError("max_image_bytes must be positive")
+    for name, value in (
+        ("max_image_bytes", max_image_bytes),
+        ("max_photo_set_bytes", max_photo_set_bytes),
+        ("max_video_bytes", max_video_bytes),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
     if job_retention_seconds < 0:
         raise ValueError("job_retention_seconds cannot be negative")
     if job_sweep_interval_seconds <= 0:
@@ -620,7 +957,13 @@ def create_app(
     runner = reconstruction_runner or _run_reconstruction
     public_origin = _configured_public_origin()
     allowed_hosts = _configured_trusted_hosts(public_origin, trusted_hosts)
+    intelligence_config = EnrichmentConfig.from_env()
+    concept_mesh_config = ConceptMeshConfig.from_env()
     image_request_bytes = max_image_bytes + request_overhead_bytes
+    photo_request_bytes = min(
+        max_photo_set_bytes, max_image_bytes * MAX_PHOTOS
+    ) + request_overhead_bytes
+    video_request_bytes = max_video_bytes + request_overhead_bytes
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -640,7 +983,10 @@ def create_app(
     application = FastAPI(
         title="CadPro",
         version=__version__,
-        description="Turn one object image into downloadable CAD artifacts.",
+        description=(
+            "Turn one object image, an ordered photo set, or a turntable video "
+            "into downloadable CAD artifacts."
+        ),
         lifespan=lifespan,
     )
 
@@ -686,6 +1032,8 @@ def create_app(
         public_origin=public_origin,
         trusted_hosts=allowed_hosts,
         image_request_bytes=image_request_bytes,
+        photo_request_bytes=photo_request_bytes,
+        video_request_bytes=video_request_bytes,
     )
 
     @application.get("/", include_in_schema=False)
@@ -708,13 +1056,35 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "capture_limits": {
+                # Keep the v1.1 key for clients that already read it.
                 "images": {"minimum": 1, "maximum": 1},
+                "single_image": {"minimum": 1, "maximum": 1},
+                "photos": {"minimum": MIN_PHOTOS, "maximum": MAX_PHOTOS},
+                "video_views": {"minimum": MIN_VIDEO_VIEWS, "maximum": MAX_VIDEO_VIEWS},
                 "image_file": {
                     "maximum_bytes": max_image_bytes,
                     "maximum_pixels": MAX_IMAGE_PIXELS,
                     "maximum_edge_pixels": MAX_IMAGE_EDGE,
                 },
+                "photo_set": {"maximum_bytes": max_photo_set_bytes},
+                "video_file": {"maximum_bytes": max_video_bytes},
                 "dimension_mm": {"maximum": MAX_WIDTH_MM},
+            },
+            "intelligence": {
+                "available": intelligence_config.available,
+                "provider": "openai",
+                "model": intelligence_config.model if intelligence_config.available else None,
+                "vision": intelligence_config.available,
+                "web_search": intelligence_config.available,
+                "geometry_mutation": False,
+            },
+            "concept_mesh": {
+                "available": concept_mesh_config.available,
+                "provider": "hunyuan-compatible-worker",
+                "format": "glb",
+                "metric_scale": False,
+                "manufacturing_cad": False,
+                "replaces_step": False,
             },
         }
 
@@ -736,6 +1106,18 @@ def create_app(
             float,
             Form(gt=0, le=MAX_WIDTH_MM, description="Desired extrusion depth in millimeters."),
         ],
+        ai_enhance: Annotated[
+            bool,
+            Form(description="Run optional vision analysis and cited web-reference research."),
+        ] = False,
+        object_hint: Annotated[
+            str,
+            Form(max_length=320, description="Optional object identity or research hint."),
+        ] = "",
+        concept_mesh: Annotated[
+            bool,
+            Form(description="Generate an optional non-metric concept GLB."),
+        ] = False,
     ) -> JSONResponse:
         if len(file) != 1:
             for upload in file:
@@ -749,9 +1131,22 @@ def create_app(
         upload = file[0]
         _validate_dimension(width_mm, field="width_mm")
         _validate_dimension(depth_mm, field="depth_mm")
+        try:
+            intelligence_parameters = _intelligence_parameters(
+                ai_enhance,
+                object_hint,
+                intelligence_config,
+            )
+            concept_mesh_parameters = _concept_mesh_parameters(
+                concept_mesh,
+                concept_mesh_config,
+            )
+        except Exception:
+            await upload.close()
+            raise
         manager = _manager(request)
         try:
-            stage = manager.stage()
+            stage = manager.stage(upload_reservation=_upload_reservation(request))
         except Exception:
             await upload.close()
             raise
@@ -768,13 +1163,196 @@ def create_app(
                 stage,
                 kind="image",
                 input_paths=[destination],
-                parameters={"width_mm": width_mm, "depth_mm": depth_mm},
+                parameters={
+                    "width_mm": width_mm,
+                    "depth_mm": depth_mm,
+                    **intelligence_parameters,
+                    **concept_mesh_parameters,
+                },
             )
-        except Exception:
+        except BaseException:
             manager.discard(stage)
             raise
         finally:
             await upload.close()
+        return _accepted_job(manager.snapshot(job.job_id))
+
+    @application.post("/api/jobs/photos", status_code=202)
+    async def create_photo_job(
+        request: Request,
+        files: Annotated[
+            list[UploadFile],
+            File(
+                description="20 to 50 object photos, repeated in rotation order.",
+                json_schema_extra={"minItems": MIN_PHOTOS, "maxItems": MAX_PHOTOS},
+            ),
+        ],
+        width_mm: Annotated[
+            float,
+            Form(gt=0, le=MAX_WIDTH_MM, description="Known maximum object width in millimeters."),
+        ],
+        clockwise: Annotated[
+            bool,
+            Form(description="Whether photo order rotates clockwise when viewed from above."),
+        ] = False,
+        ai_enhance: Annotated[
+            bool,
+            Form(description="Run optional vision analysis and cited web-reference research."),
+        ] = False,
+        object_hint: Annotated[
+            str,
+            Form(max_length=320, description="Optional object identity or research hint."),
+        ] = "",
+        concept_mesh: Annotated[
+            bool,
+            Form(description="Generate an optional non-metric concept GLB."),
+        ] = False,
+    ) -> JSONResponse:
+        if not MIN_PHOTOS <= len(files) <= MAX_PHOTOS:
+            await _close_uploads(files)
+            raise ApiError(
+                422,
+                "invalid_photo_count",
+                f"Upload between {MIN_PHOTOS} and {MAX_PHOTOS} photos in rotation order.",
+                details={"received": len(files), "minimum": MIN_PHOTOS, "maximum": MAX_PHOTOS},
+            )
+        _validate_dimension(width_mm, field="width_mm")
+        try:
+            intelligence_parameters = _intelligence_parameters(
+                ai_enhance,
+                object_hint,
+                intelligence_config,
+            )
+            concept_mesh_parameters = _concept_mesh_parameters(
+                concept_mesh,
+                concept_mesh_config,
+            )
+        except Exception:
+            await _close_uploads(files)
+            raise
+        manager = _manager(request)
+        try:
+            stage = manager.stage(upload_reservation=_upload_reservation(request))
+        except Exception:
+            await _close_uploads(files)
+            raise
+        saved: list[Path] = []
+        total_bytes = 0
+        try:
+            for index, upload in enumerate(files, start=1):
+                field = f"files[{index - 1}]"
+                suffix = _validated_upload_suffix(upload, field=field, media_kind="image")
+                destination = stage.input_dir / f"view-{index:03d}{suffix}"
+                size, header = await _save_upload(upload, destination, max_image_bytes)
+                _validate_file_signature(header, suffix, field=field, media_kind="image")
+                try:
+                    await asyncio.to_thread(validated_image_size, destination)
+                except ValueError as error:
+                    raise ApiError(422, "invalid_image", f"{field}: {error}") from error
+                total_bytes += size
+                if total_bytes > max_photo_set_bytes:
+                    raise ApiError(
+                        413,
+                        "photo_set_too_large",
+                        f"The complete photo set may not exceed {_format_bytes(max_photo_set_bytes)}.",
+                        details={"maximum_bytes": max_photo_set_bytes},
+                    )
+                saved.append(destination)
+            job = manager.submit(
+                stage,
+                kind="photos",
+                input_paths=saved,
+                parameters={
+                    "width_mm": width_mm,
+                    "clockwise": clockwise,
+                    **intelligence_parameters,
+                    **concept_mesh_parameters,
+                },
+            )
+        except BaseException:
+            manager.discard(stage)
+            raise
+        finally:
+            await _close_uploads(files)
+        return _accepted_job(manager.snapshot(job.job_id))
+
+    @application.post("/api/jobs/video", status_code=202)
+    async def create_video_job(
+        request: Request,
+        file: Annotated[UploadFile, File(description="One complete turntable video.")],
+        width_mm: Annotated[
+            float,
+            Form(gt=0, le=MAX_WIDTH_MM, description="Known maximum object width in millimeters."),
+        ],
+        views: Annotated[int, Form(ge=MIN_VIDEO_VIEWS, le=MAX_VIDEO_VIEWS)] = 24,
+        start_frame: Annotated[int, Form(ge=0)] = 0,
+        end_frame: Annotated[int | None, Form(ge=1)] = None,
+        clockwise: Annotated[bool, Form()] = False,
+        ai_enhance: Annotated[
+            bool,
+            Form(description="Run optional vision analysis and cited web-reference research."),
+        ] = False,
+        object_hint: Annotated[
+            str,
+            Form(max_length=320, description="Optional object identity or research hint."),
+        ] = "",
+        concept_mesh: Annotated[
+            bool,
+            Form(description="Generate an optional non-metric concept GLB."),
+        ] = False,
+    ) -> JSONResponse:
+        _validate_dimension(width_mm, field="width_mm")
+        try:
+            intelligence_parameters = _intelligence_parameters(
+                ai_enhance,
+                object_hint,
+                intelligence_config,
+            )
+            concept_mesh_parameters = _concept_mesh_parameters(
+                concept_mesh,
+                concept_mesh_config,
+            )
+        except Exception:
+            await file.close()
+            raise
+        if end_frame is not None and end_frame <= start_frame:
+            await file.close()
+            raise ApiError(
+                422,
+                "invalid_frame_range",
+                "end_frame must be greater than start_frame.",
+                details={"start_frame": start_frame, "end_frame": end_frame},
+            )
+        manager = _manager(request)
+        try:
+            stage = manager.stage(upload_reservation=_upload_reservation(request))
+        except Exception:
+            await file.close()
+            raise
+        try:
+            suffix = _validated_upload_suffix(file, field="file", media_kind="video")
+            destination = stage.input_dir / f"turntable{suffix}"
+            _size, header = await _save_upload(file, destination, max_video_bytes)
+            _validate_file_signature(header, suffix, field="file", media_kind="video")
+            job = manager.submit(
+                stage,
+                kind="video",
+                input_paths=[destination],
+                parameters={
+                    "width_mm": width_mm,
+                    "views": views,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "clockwise": clockwise,
+                    **intelligence_parameters,
+                    **concept_mesh_parameters,
+                },
+            )
+        except BaseException:
+            manager.discard(stage)
+            raise
+        finally:
+            await file.close()
         return _accepted_job(manager.snapshot(job.job_id))
 
     @application.get("/api/jobs/{job_id}")
@@ -811,6 +1389,11 @@ def _manager(request: Request) -> JobManager:
     return manager
 
 
+def _upload_reservation(request: Request) -> UUID | None:
+    value = request.scope.get(_UPLOAD_RESERVATION_SCOPE_KEY)
+    return value if isinstance(value, UUID) else None
+
+
 def _accepted_job(snapshot: Mapping[str, Any]) -> JSONResponse:
     return JSONResponse(
         dict(snapshot),
@@ -828,26 +1411,70 @@ def _validate_dimension(value: float, *, field: str) -> None:
         )
 
 
+def _intelligence_parameters(
+    requested: bool,
+    object_hint: str,
+    config: EnrichmentConfig,
+) -> dict[str, Any]:
+    hint = sanitize_query(object_hint)
+    if not requested:
+        return {}
+    if not config.available:
+        raise ApiError(
+            409,
+            "intelligence_unavailable",
+            (
+                "AI/web research is not configured on this server. "
+                "Local CAD reconstruction remains available."
+            ),
+        )
+    return {"ai_enhance": True, "object_hint": hint}
+
+
+def _concept_mesh_parameters(
+    requested: bool,
+    config: ConceptMeshConfig,
+) -> dict[str, Any]:
+    if not requested:
+        return {}
+    if not config.available:
+        raise ApiError(
+            409,
+            "concept_mesh_unavailable",
+            (
+                "The optional concept-mesh worker is not configured and licensed on this server. "
+                "Validated STEP reconstruction remains available."
+            ),
+        )
+    return {"concept_mesh": True}
+
+
 def _validated_upload_suffix(
     upload: UploadFile,
     *,
     field: str,
+    media_kind: Literal["image", "video"] = "image",
 ) -> str:
     filename = upload.filename or ""
     if not filename or "\x00" in filename:
         raise ApiError(422, "invalid_filename", f"{field} must have a valid filename.")
     # Only the suffix is retained; path components and the user-controlled stem are discarded.
     suffix = Path(filename.replace("\\", "/").rsplit("/", 1)[-1]).suffix.lower()
-    if suffix not in _IMAGE_SUFFIX_KIND:
-        supported = ", ".join(sorted(_IMAGE_SUFFIX_KIND))
+    allowed = _IMAGE_SUFFIX_KIND if media_kind == "image" else _VIDEO_SUFFIX_KIND
+    if suffix not in allowed:
+        supported = ", ".join(sorted(allowed))
         raise ApiError(
             415,
-            "unsupported_image_type",
+            f"unsupported_{media_kind}_type",
             f"{field} must use one of these file extensions: {supported}.",
             details={"filename": _display_filename(filename)},
         )
     received_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
-    expected_types = _IMAGE_CONTENT_TYPES[_IMAGE_SUFFIX_KIND[suffix]]
+    expected_types = (
+        _IMAGE_CONTENT_TYPES[_IMAGE_SUFFIX_KIND[suffix]]
+        if media_kind == "image"
+        else _VIDEO_CONTENT_TYPES[suffix]
+    )
     if received_type not in expected_types | _GENERIC_CONTENT_TYPES:
         raise ApiError(
             415,
@@ -895,9 +1522,10 @@ def _validate_file_signature(
     suffix: str,
     *,
     field: str,
+    media_kind: Literal["image", "video"] = "image",
 ) -> None:
-    expected = _IMAGE_SUFFIX_KIND[suffix]
-    detected = _detect_image(header)
+    expected = (_IMAGE_SUFFIX_KIND if media_kind == "image" else _VIDEO_SUFFIX_KIND)[suffix]
+    detected = _detect_image(header) if media_kind == "image" else _detect_video(header)
     if detected != expected:
         raise ApiError(
             415,
@@ -918,6 +1546,21 @@ def _detect_image(header: bytes) -> str | None:
     if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         return "webp"
     return None
+
+
+def _detect_video(header: bytes) -> str | None:
+    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"AVI ":
+        return "avi"
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        return "iso-media"
+    if header.startswith(b"\x1aE\xdf\xa3"):
+        return "ebml"
+    return None
+
+
+async def _close_uploads(uploads: Iterable[UploadFile]) -> None:
+    for upload in uploads:
+        await upload.close()
 
 
 def _register_artifacts(manifest: object, output_dir: Path) -> dict[str, Artifact]:
@@ -955,17 +1598,39 @@ def _register_artifacts(manifest: object, output_dir: Path) -> dict[str, Artifac
     return artifacts
 
 
-def _result_metadata(manifest: object) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _result_metadata(
+    manifest: object,
+) -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
     """Copy non-path export metadata into the public completion result."""
-    metrics_value = (
-        manifest.get("metrics")
+    metadata_source = (
+        manifest.get("cad", manifest)
         if isinstance(manifest, Mapping)
-        else getattr(manifest, "metrics", None)
+        else getattr(manifest, "cad", manifest)
+    )
+    metrics_value = (
+        metadata_source.get("metrics")
+        if isinstance(metadata_source, Mapping)
+        else getattr(metadata_source, "metrics", None)
     )
     diagnostics_value = (
-        manifest.get("input_diagnostics", ())
+        metadata_source.get("input_diagnostics", ())
+        if isinstance(metadata_source, Mapping)
+        else getattr(metadata_source, "input_diagnostics", ())
+    )
+    enrichment_value = (
+        metadata_source.get("enrichment")
+        if isinstance(metadata_source, Mapping)
+        else getattr(metadata_source, "enrichment", None)
+    )
+    concept_mesh_value = (
+        manifest.get("concept_mesh")
         if isinstance(manifest, Mapping)
-        else getattr(manifest, "input_diagnostics", ())
+        else getattr(manifest, "concept_mesh", None)
     )
     metrics = _json_metadata(metrics_value)
     if not isinstance(metrics, dict):
@@ -978,7 +1643,13 @@ def _result_metadata(manifest: object) -> tuple[dict[str, Any], list[dict[str, A
             converted = _json_metadata(item)
             if isinstance(converted, dict):
                 diagnostics.append(converted)
-    return metrics, diagnostics
+    enrichment = _json_metadata(enrichment_value)
+    if not isinstance(enrichment, dict):
+        enrichment = None
+    concept_mesh = _json_metadata(concept_mesh_value)
+    if not isinstance(concept_mesh, dict):
+        concept_mesh = None
+    return metrics, diagnostics, enrichment, concept_mesh
 
 
 def _json_metadata(value: object, *, _depth: int = 0) -> Any:
