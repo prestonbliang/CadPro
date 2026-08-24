@@ -80,7 +80,7 @@ def _wait_for_terminal(client: TestClient, status_url: str) -> dict:
     raise AssertionError(f"reconstruction job did not finish: {snapshot}")
 
 
-def test_frontend_supports_text_and_three_capture_modes_with_v22_metadata(
+def test_frontend_serves_v3_photogrammetry_studio_and_truthful_capabilities(
     tmp_path,
     monkeypatch,
 ):
@@ -99,7 +99,7 @@ def test_frontend_supports_text_and_three_capture_modes_with_v22_metadata(
 
     assert response.status_code == 200
     assert health.status_code == 200
-    assert health.json()["version"] == "2.2.0"
+    assert health.json()["version"] == "3.0.0"
     assert health.json()["capture_limits"]["images"] == {"minimum": 1, "maximum": 1}
     assert health.json()["capture_limits"]["photos"] == {"minimum": 20, "maximum": 50}
     assert health.json()["capture_limits"]["video_views"] == {
@@ -131,32 +131,36 @@ def test_frontend_supports_text_and_three_capture_modes_with_v22_metadata(
     assert health.json()["generative_mesh"]["creates_step"] is False
     assert "https://cadpro.example/static/og-capture-to-cad.png" in response.text
     assert "__CADPRO_ORIGIN__" not in response.text
-    assert 'data-mode="text"' in response.text
     assert 'data-mode="image"' in response.text
     assert 'data-mode="photos"' in response.text
     assert 'data-mode="video"' in response.text
-    assert 'fetch(`/api/jobs/${state.mode}`' in script.text
+    assert 'data-mode="text"' not in response.text
+    assert 'endpoint = "/api/v2/jobs/photos"' in script.text
+    assert health.json()["photogrammetry"]["api"] == "/api/v2"
+    assert health.json()["photogrammetry"]["legacy_silhouette_fallback"] is False
 
     collector = _DocumentCollector()
     collector.feed(response.text)
     assert len(collector.ids) == len(set(collector.ids))
     assert {
         "file-input",
-        "text-prompt",
-        "mesh-settings-panel",
-        "mesh-target-faces",
-        "width-mm",
-        "depth-mm",
-        "view-count",
-        "ai-enhance",
-        "neural-predict",
+        "quality-preset",
+        "target-frames",
+        "feature-matcher",
+        "mesher",
+        "use-gpu",
+        "generate-cad",
         "build-button",
+        "progress-panel",
+        "model-preview",
+        "calibration-card",
+        "artifact-grid",
         "result-section",
     } <= set(collector.ids)
     tag, file_input = collector.elements["file-input"]
     assert tag == "input"
     assert file_input["type"] == "file"
-    assert "multiple" not in file_input
+    assert "multiple" in file_input
     assert "video" not in file_input["accept"]
 
     assert script.status_code == 200
@@ -178,52 +182,41 @@ def test_frontend_enforces_bounded_inputs_and_sequential_photo_preview_memory():
     assert "MAX_PHOTO_SET_BYTES = 500 * MEBIBYTE" in script
     assert "MAX_VIDEO_BYTES = 2 * GIBIBYTE" in script
     assert "THUMBNAIL_MAX_EDGE = 240" in script
-    assert "MAX_IMAGE_EDGE = 8_192" in script
-    assert "MAX_IMAGE_PIXELS = 12_500_000" in script
-    assert "MAX_PROMPT_CHARS = 600" in script
-    assert "MAX_MESH_FACES = 300_000" in script
-    assert 'mode === "image" && incoming.length !== 1' in script
-    assert "photos && incoming.length > 50" in script
-    assert "photos ? count >= 20 && count <= 50" in script
-    assert "video && incoming.length !== 1" in script
+    assert "MAX_IMAGE_EDGE = 20_000" in script
+    assert "MAX_IMAGE_PIXELS = 40_000_000" in script
+    assert 'state.mode !== "photos" && files.length !== 1' in script
+    assert "files.length < MIN_PHOTOS || files.length > MAX_PHOTOS" in script
+    assert "count >= MIN_PHOTOS && count <= MAX_PHOTOS" in script
     assert "file.size > MAX_IMAGE_BYTES" in script
-    assert "totalBytes > MAX_PHOTO_SET_BYTES" in script
-    assert "incoming[0].size > MAX_VIDEO_BYTES" in script
-    assert "state.files = [...incoming]" in script
+    assert "files.reduce((sum, file) => sum + file.size, 0) > MAX_PHOTO_SET_BYTES" in script
+    assert "file.size > MAX_VIDEO_BYTES" in script
+    assert "state.files = incoming" in script
     assert "syntheticProgress" not in script
-    assert "new AbortController()" in script
-    assert "for (let index = 0; index < files.length; index += 1)" in script
-    assert "await inspectImage(files[index], signal)" in script
-    assert "state.thumbnails.set(files[index], result.thumbnail)" in script
+    assert "for (let index = 0; index < visible.length; index += 1)" in script
+    assert "image.src = await inspectImage(file)" in script
+    assert "URL.revokeObjectURL(url)" in script
     assert 'canvas.toDataURL("image/jpeg", 0.74)' in script
-    assert "Promise.all(state.files.map" not in script
-    assert 'fileInput.multiple = mode === "photos"' in script
-    assert 'form.append("files", file, file.name)' in script
+    assert "Promise.all(files.map" not in script
+    assert 'input.multiple = mode === "photos"' in script
+    assert 'state.files.forEach((file) => form.append("files", file, file.name))' in script
     assert 'form.append("file", state.files[0], state.files[0].name)' in script
-    assert 'fetch(`/api/jobs/${state.mode}`' in script
-    assert 'form.append("prompt", prompt)' in script
-    assert 'form.append("mesh_target_faces", $("#mesh-target-faces").value)' in script
-    assert 'payload.kind === "text"' in script
-    assert 'data-mode="text"' in document
+    assert 'endpoint = "/api/v2/jobs/photos"' in script
+    assert 'endpoint = "/api/v2/jobs/video"' in script
+    assert 'endpoint = "/api/v2/jobs/single-image"' in script
     assert 'data-mode="photos"' in document
     assert 'data-mode="video"' in document
-    assert 'id="depth-mm"' in document
-    assert 'id="view-count" type="range" min="20" max="50"' in document
-    assert 'id="neural-predict" type="checkbox" disabled' in document
-    assert 'id="text-prompt" maxlength="600"' in document
-    assert 'id="mesh-target-faces" type="number" min="100" max="300000"' in document
-    assert 'id="download-generated"' in document
-    assert 'id="download-rigged"' in document
-    assert 'form.append("neural_predict", String(neuralRequested))' in script
-    assert "result.neural_prediction" in script
+    assert 'data-mode="image"' in document
+    assert 'id="target-frames" type="number" min="8" max="200"' in document
+    assert 'id="maximum-duration" type="number" min="1" max="3600"' in document
+    assert 'id="model-preview"' in document
+    assert 'id="apply-calibration"' in document
+    assert 'id="artifact-grid"' in document
+    assert 'cadpro-point-picked' in script
     assert 'aria-controls="capture-panel"' in document
     assert 'id="capture-panel" role="tabpanel"' in document
-    assert 'id="optional-warning" role="status"' in document
     assert "image/tiff" not in document
     assert "image/tiff" not in script
-    assert '["ArrowLeft", "ArrowRight", "Home", "End"]' in script
-    assert 'result.concept_mesh?.status === "failed"' in script
-    assert 'research?.status === "failed"' in script
+    assert "['ArrowLeft', 'ArrowRight', 'Home', 'End']" in script
     assert ".drop-zone:focus-within" in styles
     assert ".mode-button:focus-visible" in styles
     assert ".mode-switch.three-modes { grid-template-columns: 1fr; }" in styles

@@ -1,503 +1,798 @@
-# CadPro
+# CadPro 3.0
 
-CadPro turns object captures into interoperable CAD and 3D files through a local web
-application. Version 2.2 keeps two deliberately separate output lanes:
+CadPro is a local web application for turning an overlapping photo set or an orbit video into
+a real photogrammetry reconstruction. It separates sparse points, dense points, triangle
+meshes, printable meshes, and analytic CAD so that a good-looking mesh is never mislabeled as
+a STEP model.
 
-- **Measured STEP reconstruction** uses a real measurement and local geometry processing to
-  create the validated CAD exports described below.
-- **AI visual mesh generation** optionally sends a prompt or representative images to Meshy
-  and returns visual GLB/STL assets. These meshes are non-metric and are never STEP.
+The product version is **3.0**. The real-scan HTTP contract is intentionally versioned at
+`/api/v2`; the API version and application release version are independent.
 
-The measured reconstruction lane accepts exactly one of these capture types:
+> [!IMPORTANT]
+> **Verification status on August 23, 2026:** this Windows development machine does not have
+> FFmpeg, FFprobe, COLMAP, or OpenMVS installed or discoverable. `cadpro scan-doctor` reports
+> photo SfM, video ingest, and camera texturing as unavailable. Blender 4.2.3 LTS, trimesh
+> 4.12.2, and OpenCascade Python bindings 7.9.3.1 are available. No user photo set or video was
+> reconstructed with the native pipeline on this machine. Automated coverage uses mocked
+> process calls and the explicitly injected `SyntheticTestAdapter`; that adapter is test-only,
+> requires `allow_test_only=True`, and is not a production fallback. Install the native tools
+> below and run a real capture before treating this host as an end-to-end scanner.
 
-- one object photo;
-- 20–50 ordered photos covering one complete revolution; or
-- one turntable video, sampled into 20–50 evenly spaced views.
+## What version 3.0 does
 
-Every successful measured reconstruction exports a validated **STEP** solid, binary **STL**,
-**GLB**, an interactive offline HTML preview, and a JSON reconstruction report. STEP is
-intended for Onshape, Fusion, SolidWorks, FreeCAD, and similar CAD systems. STL and GLB are
-included for Blender, slicers, web viewers, and mesh workflows. The optional Meshy lane
-instead exports an AI-generated GLB, STL, preview, and provider report; it does not create or
-modify a STEP solid.
+The standard lane is local and does not require a paid cloud service:
 
-CadPro is measurement-driven reconstruction, not a magic recovery of hidden design intent.
-Read [Technical truth and limitations](#technical-truth-and-limitations) before using an
-output for engineering or manufacturing.
+1. stream and validate untrusted uploads;
+2. inspect video with FFprobe and extract bounded candidate frames with FFmpeg;
+3. reject blurry, duplicate, badly exposed, or low-feature views;
+4. estimate cameras and a sparse cloud with COLMAP;
+5. select the strongest COLMAP component instead of assuming `sparse/0`;
+6. build dense points and a mesh with OpenMVS, or with COLMAP's CUDA dense tools;
+7. refine, texture when available, and conservatively repair the triangle mesh;
+8. apply scale only from an explicit two-point measurement;
+9. fit a simple analytic box or right cylinder when confidence gates pass;
+10. reopen and validate every advertised artifact before publishing it.
 
-## Version 2.2 capability contract
+Version 3.0 does **not** infer an accurate object from one photograph. The
+`POST /api/v2/jobs/single-image` route returns `409 single_image_provider_unavailable` because
+no local single-image provider is configured. Use multiple overlapping views or an orbit video.
 
-| Website mode | Required input | Measurement | Geometry produced |
-| --- | --- | --- | --- |
-| One photo | Exactly one square-on object image | Real profile width; chosen depth or trained neural depth estimate | Measurement-scaled 2.5D silhouette/profile extrusion |
-| Photo orbit | 20–50 ordered, evenly spaced photos | Real maximum width | Measurement-scaled silhouette visual hull |
-| Turntable video | Exactly one steady full-revolution video; choose 20–50 sampled views | Real maximum width | Measurement-scaled silhouette visual hull |
-| Optional Meshy visual mesh | Text, one image, or at most four provider-selected representative views | None; output is non-metric | Generative polygon GLB/STL only; never STEP |
+### Input contract
 
-The three measured modes share the same guarded job queue, isolated transient storage, progress
-UI, OpenCascade export pipeline, and artifact verification. A completed STEP file is reloaded
-and rejected unless it contains exactly one valid, connected, positive-volume solid. STL and
-GLB are validated as non-empty geometry before the result is published. Meshy jobs use a
-separate external-provider path and never enter that STEP export pipeline.
+| Input | API contract | Practical capture target |
+| --- | --- | --- |
+| Photos | `POST /api/v2/jobs/photos`; 3–100 JPEG, PNG, or WebP files; 25 MiB per image and 500 MiB total | 20–50 sharp, substantially overlapping views at multiple elevations |
+| Video | `POST /api/v2/jobs/video`; one AVI, M4V, MKV, MOV, MP4, or WebM up to 2 GiB | One slow, steady orbit; default duration limit 300 seconds and default target 40 useful frames |
+| Single image | Explicitly unavailable in the v3 scan lane | Capture more views; CadPro will not fabricate hidden geometry |
 
-Version 2.2 includes:
+The video API accepts a target from 8–200 selected frames. Its duration parameter defaults to
+300 seconds and has a hard schema ceiling of 3,600 seconds; the public capability response and
+normal website workflow advertise 300 seconds. FFmpeg first extracts at most 600 candidates at
+3 candidates/second by default, then CadPro applies blur, spacing, similarity, and viewpoint
+change checks. Fewer than eight useful frames is a failed capture, not a synthetic success.
 
-- an optional, server-side Meshy provider for text, one-image, and representative multi-view
-  AI visual-mesh generation, kept separate from measured STEP reconstruction;
-- a trainable local neural network that predicts bounded depth-to-width ratios from images;
-- JSONL datasets using labeled dimensions or aligned image/STEP training pairs;
-- safe data-only NPZ checkpoints, Adam training, CLI inference, and website inference;
-- responsive one-photo, photo-orbit, and turntable-video workflows;
-- browser- and server-side file count, type, byte, pixel, and measurement limits;
-- order-preserving photo upload with sequential, memory-bounded thumbnail inspection;
-- configurable turntable direction and 20–50-view video sampling;
-- measured profile extrusion for one photo and silhouette intersection for full orbits;
-- optional OpenAI vision and cited web-reference research, kept separate from geometry;
-- private asynchronous jobs, opaque artifact IDs, expiry cleanup, and bounded admission;
-- Trusted Host, same-origin upload, and early multipart request-size enforcement;
-- STEP, STL, GLB, HTML preview, and JSON report generation;
-- Docker packaging, a health endpoint, command-line converters, and `cad-diff`.
+## Mesh is not CAD
 
-## Install and launch
+CadPro keeps these representations distinct:
 
-CadPro requires Python 3.10 or newer.
+| Representation | Meaning | Typical artifact |
+| --- | --- | --- |
+| Sparse point cloud | Feature tracks used to solve camera poses | `cadpro-sparse-cloud.ply` |
+| Dense point cloud | Multi-view stereo samples | `cadpro-dense-cloud.ply` |
+| Triangle mesh | Reconstructed surface approximation | cleaned PLY and OBJ |
+| Visualization model | Mesh packaged for a viewer, textured only when texture data survives validation | GLB |
+| Printable mesh | Reopened watertight manifold mesh | STL, conditionally |
+| Analytic CAD/B-rep | A compact fitted box or cylinder with valid topology and metric dimensions | STEP, conditionally |
+
+OBJ, GLB, STL, and PLY are not parametric CAD. Converting triangles to a faceted STEP shell or
+renaming a mesh would not recover planes, holes, sketches, constraints, tolerances, or design
+history. CadPro therefore publishes STEP only after scale, analytic-fit, topology, volume,
+dimension, and reopen checks pass. Organic objects and most manufactured parts with several
+features should be remodeled from the mesh in a CAD system.
+
+## Quick start
+
+Python 3.11 or newer is required. These commands install the Python application and its
+OpenCascade binding; the native reconstruction programs are separate installations.
 
 ### Windows PowerShell
 
 ```powershell
-py -m venv .venv
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv\Scripts\cadpro.exe web
+
+.venv\Scripts\cadpro.exe scan-doctor
+.venv\Scripts\cadpro.exe web --no-open
 ```
 
-### macOS/Linux
+### Linux or macOS
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/cadpro web
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e '.[dev]'
+
+.venv/bin/cadpro scan-doctor
+.venv/bin/cadpro web --no-open
 ```
 
-Open `http://127.0.0.1:8000`. Use `cadpro web --no-open` when you do not want CadPro to
-open a browser automatically.
-
-## Capture and reconstruction workflows
-
-### One photo
-
-1. Put the object against a plain background that strongly contrasts with its outline.
-2. Photograph the desired profile square-on, with the whole object clear of every edge.
-3. Choose **One photo** and select one JPEG, PNG, WebP, or BMP image.
-4. Enter the object's measured horizontal width and either enter the uniform depth or select a
-   configured trained neural checkpoint to predict it.
-5. Build, inspect the preview, download the files, and verify critical dimensions in CAD.
-
-CadPro extracts the visible outline and enclosed openings, scales the outline to the entered
-width, and extrudes it by the chosen or predicted depth. Manual depth is an exact design input;
-neural depth is a learned estimate recorded in the result and report. A visible enclosed opening
-becomes a through-hole.
-
-### Ordered photo orbit
-
-1. Fix the camera, zoom, focus, lighting, and a plain contrasting background.
-2. Keep the entire object in frame and rotate the object through exactly one revolution.
-3. Capture 20–50 evenly spaced photos with identical pixel dimensions.
-4. Choose **Photo orbit**, select the images in rotation order, and correct their order in the
-   thumbnail strip if needed.
-5. Enter the object's measured maximum width and the rotation direction as viewed from above.
-
-CadPro extracts one silhouette from each ordered view, scales the capture from the entered
-width, and intersects the view volumes into one visual hull. Photo order, even angular spacing,
-stable framing, and a stationary camera are part of the reconstruction contract.
-
-### Turntable video
-
-1. Fix the camera and record the object completing exactly one steady 360-degree turn.
-2. Avoid pauses, speed changes, camera motion, autofocus shifts, and cropped frames.
-3. Choose **Turntable video**, select one supported video, and choose 20–50 sampled views.
-4. Enter the object's measured maximum width and rotation direction.
-
-CadPro samples evenly spaced frames from the selected revolution and feeds their silhouettes
-through the same visual-hull reconstruction used by a photo orbit. More sampled views improve
-angular coverage but cannot reveal a feature that never changes an outside silhouette.
-
-Image files are limited to 25 MiB each, 12.5 million pixels, and 8,192 pixels on either edge.
-A photo set is limited to 500 MiB and a video to 2 GiB. Server settings can lower these byte
-limits. Measurements must be finite and greater than zero.
-
-## Trainable neural image-to-STEP prediction
-
-CadPro 2.2 includes the real train/predict pipeline in `src/cadpro/neural.py`. It converts each
-image into a normalized 24 x 24 silhouette raster plus aspect, foreground, hole, and symmetry
-features. A two-hidden-layer neural network learns the logarithmic depth-to-width ratio. At
-inference time, the user still supplies one real width measurement; the model predicts depth,
-the image supplies the visible profile, and OpenCascade builds and validates the STEP solid.
-
-This design learns a useful hidden parameter without pretending that one image contains unseen
-topology. It does not infer backside outlines, side holes, pockets, threads, tolerances, or native
-feature history.
-
-### Prepare training data
-
-Create a UTF-8 JSON Lines file with at least four samples. Production models should use a
-representative, carefully measured dataset with separate validation objectsâ€”normally hundreds
-or thousands of examples, not the four-sample smoke-test minimum.
-See `examples/neural_dataset.jsonl.example` for a copyable mixed-label manifest.
-
-Use explicit labels:
-
-```json
-{"image":"images/bracket-001.png","width_mm":120.0,"depth_mm":28.0}
-{"image":"images/bracket-002.png","width_mm":84.5,"depth_mm":16.0}
-```
-
-Or pair an image with one aligned STEP solid:
-
-```json
-{"image":"images/bracket-003.png","step":"steps/bracket-003.step"}
-```
-
-For STEP-paired training, align the solid so X is the photographed horizontal width and Z is the
-hidden extrusion depth. CadPro rejects files without exactly one solid and derives the labels
-from the STEP bounding box. Relative paths are resolved from the manifest directory.
-
-### Train and predict
-
-```powershell
-.venv\Scripts\cadpro.exe neural-train dataset.jsonl `
-  --checkpoint models/cadpro-depth-model.npz `
-  --epochs 300 --batch-size 16 --validation-fraction 0.2
-
-.venv\Scripts\cadpro.exe neural-predict bracket.png `
-  --checkpoint models/cadpro-depth-model.npz `
-  --width-mm 120 --output bracket-neural.step
-```
-
-Training uses deterministic NumPy operations and Adam optimization, so no multi-gigabyte ML
-framework is required. Checkpoints contain arrays and JSON metadata only and are loaded with
-pickle disabled. Validate a checkpoint on held-out objects from the same capture process before
-enabling it for users.
-
-### Enable the trained model on the website
-
-```powershell
-$env:CADPRO_NEURAL_ENABLED = "1"
-$env:CADPRO_NEURAL_CHECKPOINT = "C:\absolute\path\to\cadpro-depth-model.npz"
-.venv\Scripts\cadpro.exe web
-```
-
-Choose **One photo**, enter the measured width, and select **Predict hidden depth with a trained
-neural network**. The result page and JSON report show the predicted depth, learned ratio,
-validation error, heuristic confidence score, and explicit manufacturing warnings. Checkpoint
-paths are never returned by the health or job APIs. A checkpoint trained without a held-out
-validation split receives an automatic confidence penalty.
-
-## Optional AI and cited web enrichment
-
-CadPro can add an advisory research brief to a result. This is deliberately separate from the
-measurement-driven reconstruction and is off by default. To enable it on the server:
-
-```powershell
-$env:CADPRO_AI_ENRICHMENT = "1"
-$env:OPENAI_API_KEY = "your-api-key"
-# Optional provider model override:
-$env:CADPRO_AI_MODEL = "your-supported-model"
-.venv\Scripts\cadpro.exe web
-```
-
-On macOS/Linux, set the same environment variables with `export`. A user must also select the
-optional intelligence checkbox for an individual job. An API key by itself does not upload any
-capture.
-
-When requested, CadPro sends at most six bounded representative views to the OpenAI Responses
-API for vision analysis and allows cited web search. Images are resized and compressed before
-the request. The validated response can contain an object identity hypothesis, candidate
-dimensions, visible feature observations, uncertainties, and source URLs. Those findings are
-written into the job result and JSON report for human review.
-
-AI/web enrichment **never changes the measured width, extrusion depth, silhouettes, B-rep, or
-STEP output**. A visual estimate is not a measurement. A published dimension may belong to a
-different product revision. Check every cited source and confirm the photographed object before
-using any advisory information. If enrichment is disabled or fails, local reconstruction still
-continues.
-
-Enabling this feature sends representative images and the optional object hint to an external
-provider. Review your provider's privacy, retention, regional-processing, and billing terms
-before enabling it for confidential objects.
-
-## Optional Meshy AI visual-mesh provider
-
-Version 2.2 can use Meshy's hosted API to generate a detailed visual mesh from text or object
-images. This provider is off by default and runs on the server so its credential is never placed
-in browser JavaScript. It is an independent **AI visual mesh** lane: Meshy output never changes,
-replaces, or supplies geometry to CadPro's measurement-driven STEP lane.
-
-Create and fund a Meshy API account, create an API key in Meshy's settings, and then configure
-the CadPro server:
-
-```powershell
-$env:CADPRO_MESHY_ENABLED = "1"
-$env:MESHY_API_KEY = "msy_your-api-key"
-.venv\Scripts\cadpro.exe web
-```
-
-On macOS/Linux, set the same variables with `export` and start the existing `cadpro web`
-command. CadPro does not bundle a Meshy account, credits, model weights, or an API license.
-Leaving either the feature flag or credential unavailable keeps the provider disabled without
-disabling local measured reconstruction.
-
-### Meshy inputs and provider settings
-
-The website can submit these visual-generation inputs:
-
-- **Text:** a description is sent through Meshy's Text-to-3D workflow.
-- **One image:** one bounded object image is sent to Meshy's Image-to-3D workflow.
-- **Multiple photos or video:** CadPro selects at most four representative, well-separated views
-  from the ordered capture or locally sampled video frames. Meshy's Multi-Image-to-3D API accepts
-  only one to four images, so it does not receive the entire 20–50-view reconstruction set or a
-  raw video.
-
-The primary/front view should show the object clearly, and every submitted view should depict
-the same object with consistent lighting and little occlusion. More supplied photos do not make
-Meshy's four-image limit larger; the full measured capture still belongs to CadPro's local
-silhouette reconstruction lane.
-
-The optional provider settings affect only the AI mesh:
-
-- **Textured** asks Meshy to synthesize texture rather than return geometry alone.
-- **PBR** additionally requests metallic, roughness, and normal material maps and therefore only
-  applies when texturing is enabled.
-- **Remesh topology and target faces** choose triangle or quad-dominant output and an approximate
-  polygon target. Meshy may deviate from the requested face count. Remeshing does not recover
-  analytic planes, cylinders, holes, sketches, dimensions, constraints, or CAD feature history.
-- **Rigging** is optional post-processing for a suitable textured humanoid GLB. Meshy's current
-  API documentation limits reliable programmatic rigging to standard biped humanoids with clear
-  limbs and body structure; it is not a general rigging mode for mechanical parts, animals, or
-  arbitrary objects. The character-height field guides rig scaling only and is not a measured
-  dimension for CAD.
-
-Meshy jobs run asynchronously. CadPro tracks the provider task and downloads completed assets
-while their signed URLs are available. A successful visual-mesh job publishes an AI-generated
-**GLB**, **STL**, interactive preview, and JSON provider report. Use GLB for materials and a
-Blender/web workflow; STL contains geometry only. A successful optional humanoid-rigging stage
-adds a separate rigged GLB. Inspect the report for the selected input mode, provider settings,
-provenance, and warnings.
-
-### Mesh is not STEP
-
-Meshy generates triangles or quad-dominant polygon meshes. It does not return STEP, B-rep faces,
-parametric features, design history, tolerances, or verified real-world dimensions. CadPro does
-not wrap, rename, or advertise a Meshy mesh as STEP. Even when the object looks convincing or a
-provider estimates scale, the result remains a **non-metric visual asset** and may hallucinate
-the hidden side, close real holes, add details, or omit functional geometry.
-
-Use the separate measured lane when a STEP file is required: provide a real width and the depth
-or a full ordered capture, let the local OpenCascade pipeline build and validate the solid, and
-then verify it in CAD. Use the Meshy lane for concept visualization, Blender work, game assets,
-or a manual remodeling reference. Never use its apparent dimensions for manufacturing.
-
-### Billing, data, retention, and rights
-
-Enabling Meshy sends the selected prompt or representative images to an external provider.
-Before enabling it for user, client, proprietary, or export-controlled objects, review the live
-provider agreement and obtain any contract your use requires:
-
-- Meshy's [authentication guide](https://docs.meshy.ai/en/api/authentication) explains API-key
-  creation and storage. The key must remain a server secret; Meshy's
-  [error reference](https://docs.meshy.ai/en/api/errors) says direct browser CORS calls are not
-  permitted.
-- API generation uses paid credits. Review Meshy's current
-  [API pricing](https://docs.meshy.ai/en/api/pricing) and
-  [rate limits](https://docs.meshy.ai/en/api/rate-limits); costs and model availability can
-  change.
-- Meshy's [Terms of Service](https://www.meshy.ai/terms-of-use) currently state that
-  non-Enterprise API output is deleted from Meshy's service three days after generation. Keep
-  required CadPro downloads and reports under your own retention policy.
-- Those Terms also currently permit training on non-Enterprise customer inputs and outputs
-  unless otherwise agreed. Do not promise confidential or no-training handling based only on
-  enabling this integration; obtain an appropriate written plan or agreement when required.
-- You must own or have permission to upload every image and to use the resulting asset. Review
-  the plan-specific output license and any attribution, privacy, regional-processing, and
-  commercial-use obligations before distribution.
-
-The relevant provider workflows are documented by Meshy at
-[Text to 3D](https://docs.meshy.ai/en/api/text-to-3d),
-[Image to 3D](https://docs.meshy.ai/en/api/image-to-3d),
-[Multi-Image to 3D](https://docs.meshy.ai/en/api/multi-image-to-3d), and
-[Rigging](https://docs.meshy.ai/en/api/rigging). Provider documentation and terms can change;
-review them again before each production deployment.
-
-### Test the Meshy lane
-
-1. Set `CADPRO_MESHY_ENABLED=1` and `MESHY_API_KEY`, restart the web server, and open the local
-   website.
-2. Confirm the optional Meshy controls are available. Start with a non-confidential test prompt
-   or one clear image and geometry-only settings to avoid unnecessary texture/rigging credits.
-3. Wait for the asynchronous job to finish, then download and open the GLB in Blender or another
-   glTF viewer and inspect the STL in a mesh viewer or slicer.
-4. Open the provider report and confirm its input mode, view count when applicable, requested
-   settings, warnings, and visual-mesh/non-metric classification. Confirm that the Meshy result
-   contains no STEP artifact.
-5. Run a normal measured capture separately, download its STEP, and verify that its dimensions
-   and reconstruction report come from the measured local lane rather than the Meshy job.
-6. Restart without the Meshy feature flag to confirm the external controls become unavailable
-   while one-photo, photo-orbit, and turntable-video STEP reconstruction remain usable.
-
-## Legacy optional Hunyuan-compatible concept mesh worker
-
-`src/cadpro/ml_mesh.py` contains an opt-in integration seam for an administrator-operated,
-Hunyuan-compatible image-to-3D worker. When the worker is available, a website user can request
-an additional concept GLB alongside the normal validated exports. Concept generation remains a
-separate companion path and never changes or replaces the STEP reconstruction. The worker must
-expose `POST /generate`, accept one bounded base64 JPEG in JSON, and return a self-contained
-binary glTF 2.0 file.
-
-The client contract follows Tencent's official
-[Hunyuan3D-2 API server](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) pattern. Run the exact
-worker/model version you have reviewed as a separate GPU service; pin its revision and follow
-that repository's installation, hardware, and license instructions. If a newer worker such as
-[Hunyuan3D-2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) exposes a different response,
-put a small adapter in front of it that preserves the contract above.
-
-Configure it with:
-
-```powershell
-$env:CADPRO_ML_MESH_ENABLED = "1"
-$env:CADPRO_ML_MESH_LICENSE_ACCEPTED = "1"
-$env:CADPRO_ML_MESH_ENDPOINT = "https://your-worker.example/generate"
-# Optional server-owned bearer token:
-$env:CADPRO_ML_MESH_TOKEN = "your-worker-token"
-```
-
-Only enable this after reviewing and explicitly accepting the exact model, weights, code, and
-deployment licenses used by your worker. CadPro does not bundle, endorse, or silently accept a
-third-party model license. A user must also select **High-detail AI concept mesh** for an
-individual job; configuring the worker does not send every capture automatically.
-
-The returned `cadpro-ai-concept.glb` is a **non-metric visual concept mesh**. It is not derived
-from the validated STEP solid, is not manufacturing CAD, and is never converted or presented as
-STEP. Treat it as a visual reference for Blender or a manual remodeling workflow. The module
-validates the GLB container and embedded position geometry, but that does not establish scale,
-dimensional accuracy, watertightness, topology quality, or manufacturability.
-
-## Docker and network safety
+Open `http://127.0.0.1:8000`. The FastAPI server, static website, persistent SQLite scan queue,
+and one bounded worker start together; there is no separate frontend or worker command.
+`cadpro web` opens the browser unless `--no-open` is supplied. Keep the default loopback host
+unless you have added authentication and a trusted reverse proxy—the application itself does
+not provide multi-user authentication.
+
+## Native dependency setup
+
+The adapter was audited against these upstream versions and command help/source contracts:
+
+| Component | Reference version | Purpose | Official source |
+| --- | --- | --- | --- |
+| COLMAP | 4.1.1, released July 17, 2026 | features, matching, camera/SfM solution, and optional CUDA dense reconstruction | [4.1.1 release](https://github.com/colmap/colmap/releases/tag/4.1.1), [4.1.1 CLI guide](https://github.com/colmap/colmap/blob/4.1.1/doc/cli.rst) |
+| OpenMVS | 2.4.0, released January 20, 2026 | CPU-capable dense reconstruction, mesh refinement, and camera-derived texture export | [2.4.0 release](https://github.com/cdcseacave/openMVS/releases/tag/v2.4.0), [usage guide](https://github.com/cdcseacave/openMVS/wiki/Usage) |
+| FFmpeg/FFprobe | 9.0.1, released August 12, 2026 | video metadata and bounded frame extraction | [download/source page](https://ffmpeg.org/download.html), [FFprobe](https://ffmpeg.org/ffprobe.html), [filters](https://ffmpeg.org/ffmpeg-filters.html#select_002c-aselect) |
+| cadquery-ocp-novtk | 7.9.3.1.1 package line, OCP runtime 7.9.3.1 on this host | STEP construction and reopen validation | [package record](https://pypi.org/project/cadquery-ocp-novtk/) |
+
+`scan-doctor` is the source of truth for a particular machine. A version number alone does not
+prove that a build contains the required commands, CUDA support, codecs, or compatible DLLs.
+
+### Windows
+
+1. Download one official COLMAP 4.1.1 archive:
+
+   - `colmap-x64-windows-cuda.zip` — SHA-256
+     `b06064e7e4bd34f5b4ef71b442d3537d95d57c666dbec5a3b475902ccd832b9b`;
+   - `colmap-x64-windows-nocuda.zip` — SHA-256
+     `faf1247d2ec90933aa8bd003709790abf0211cdc132cceec4c831718f2e0895a`.
+
+   The no-CUDA build is sufficient for sparse reconstruction when OpenMVS supplies the dense
+   stage. COLMAP's `patch_match_stereo` path requires a compatible CUDA build and NVIDIA GPU.
+   Upstream documents `COLMAP.bat -h` for its release layout. CadPro launches argument arrays
+   without a shell; in the standard archive it resolves the wrapper to `bin\colmap.exe`. Keep
+   the archive's required DLL directories discoverable by Windows.
+
+2. Download one official OpenMVS 2.4.0 archive:
+
+   - `OpenMVS_Windows_x64.zip` — SHA-256
+     `0c31660c15c9ebc4c106873cf67564d9570d404aef7a6403451da1b6178b2167`;
+   - `OpenMVS_Windows_x64_CUDA.7z` — SHA-256
+     `6aac6b14ef478e501d2514cd1d74ed20e659b53b3bc2835d45a473ddfb921621`.
+
+   CadPro needs `InterfaceCOLMAP`, `DensifyPointCloud`, `ReconstructMesh`, and `RefineMesh` for
+   the OpenMVS geometry route. `TextureMesh` is additionally required for camera-derived
+   textures. Review the release's third-party notices before deployment.
+
+3. Obtain FFmpeg 9.0.1. FFmpeg.org publishes source and links to external Windows binary
+   providers; FFmpeg.org does not itself publish the Windows executable build. Record the
+   provider and configuration you choose, and verify both `ffmpeg.exe` and `ffprobe.exe`.
+
+4. Verify downloaded official release archives before extracting:
+
+   ```powershell
+   Get-FileHash -Algorithm SHA256 -LiteralPath C:\Downloads\colmap-x64-windows-nocuda.zip
+   Get-FileHash -Algorithm SHA256 -LiteralPath C:\Downloads\OpenMVS_Windows_x64.zip
+   ```
+
+5. Either put the executables on the service account's `PATH`, or set explicit absolute paths.
+   Replace these examples with the actual extracted locations:
+
+   ```powershell
+   $env:CADPRO_COLMAP_PATH = "C:\Tools\COLMAP-4.1.1\bin\colmap.exe"
+   $env:CADPRO_FFMPEG_PATH = "C:\Tools\FFmpeg-9.0.1\bin\ffmpeg.exe"
+   $env:CADPRO_FFPROBE_PATH = "C:\Tools\FFmpeg-9.0.1\bin\ffprobe.exe"
+   $env:CADPRO_OPENMVS_INTERFACE_PATH = "C:\Tools\OpenMVS-2.4.0\bin\InterfaceCOLMAP.exe"
+   $env:CADPRO_OPENMVS_DENSIFY_PATH = "C:\Tools\OpenMVS-2.4.0\bin\DensifyPointCloud.exe"
+   $env:CADPRO_OPENMVS_RECONSTRUCT_PATH = "C:\Tools\OpenMVS-2.4.0\bin\ReconstructMesh.exe"
+   $env:CADPRO_OPENMVS_REFINE_PATH = "C:\Tools\OpenMVS-2.4.0\bin\RefineMesh.exe"
+   $env:CADPRO_OPENMVS_TEXTURE_PATH = "C:\Tools\OpenMVS-2.4.0\bin\TextureMesh.exe"
+
+   .venv\Scripts\cadpro.exe scan-doctor
+   ```
+
+   Environment variables must name files, not directories. If a direct COLMAP executable
+   starts only from its release folder, fix the release DLL search configuration before
+   launching CadPro.
+
+### Linux
+
+Use the official [COLMAP build instructions](https://colmap.github.io/install.html) to build or
+install tag 4.1.1. A distribution package may be older, so confirm the command help rather than
+assuming its version. For OpenMVS, use the official `OpenMVS_Ubuntu_x64.zip` 2.4.0 asset
+(SHA-256 `7104ae1ddd6ca38fbca9e0e4a70b20af59e21e0b497eb7181c864fbf38ca8d00`)
+or build tag 2.4.0 with the official [building guide](https://github.com/cdcseacave/openMVS/wiki/Building).
+Build/install FFmpeg 9.0.1 from its signed source release or use a distribution build whose
+configuration you have checked.
+
+Set the same `CADPRO_*_PATH` variables to absolute executable files when the programs are not
+on `PATH`:
 
 ```bash
-docker build -t cadpro .
-docker run --rm -p 127.0.0.1:8000:8000 \
-  -e CADPRO_PUBLIC_ORIGIN=http://localhost:8000 \
-  cadpro
+export CADPRO_COLMAP_PATH=/opt/colmap-4.1.1/bin/colmap
+export CADPRO_FFMPEG_PATH=/opt/ffmpeg-9.0.1/bin/ffmpeg
+export CADPRO_FFPROBE_PATH=/opt/ffmpeg-9.0.1/bin/ffprobe
+export CADPRO_OPENMVS_INTERFACE_PATH=/opt/openmvs-2.4.0/bin/InterfaceCOLMAP
+export CADPRO_OPENMVS_DENSIFY_PATH=/opt/openmvs-2.4.0/bin/DensifyPointCloud
+export CADPRO_OPENMVS_RECONSTRUCT_PATH=/opt/openmvs-2.4.0/bin/ReconstructMesh
+export CADPRO_OPENMVS_REFINE_PATH=/opt/openmvs-2.4.0/bin/RefineMesh
+export CADPRO_OPENMVS_TEXTURE_PATH=/opt/openmvs-2.4.0/bin/TextureMesh
+.venv/bin/cadpro scan-doctor
 ```
 
-The explicit loopback publish address keeps the container reachable only from the local
-machine. `CADPRO_PUBLIC_ORIGIN` supplies social-preview URLs and the permitted browser upload
-origin; its hostname is also trusted for the HTTP `Host` header. Loopback hosts are always
-trusted. For a reverse proxy, set `CADPRO_TRUSTED_HOSTS` to the necessary comma-separated hosts
-and preserve the public Host header. Forwarded headers are not trusted by default.
+### macOS
 
-The service has no user accounts. Keep it on localhost, or place it behind authentication, TLS,
-network-level upload/rate limits, and appropriate external-provider controls before public use.
-The default application admission limit allows one active reconstruction plus one queued job,
-preventing an unbounded reconstruction queue. Job data expires after 24 hours by default.
+Build/install COLMAP 4.1.1 according to the official
+[macOS instructions](https://colmap.github.io/install.html#macos). OpenMVS 2.4.0 publishes
+`OpenMVS_macOS_arm64.zip` with SHA-256
+`3d4c616c97031b1ab6e2eecb0ddd5614fb99513c0782a32c9350602faf38799b`; Intel machines need a
+compatible source build. Obtain FFmpeg 9.0.1 from signed source or a binary provider linked by
+FFmpeg.org. Then use the Unix environment-variable pattern above and run `scan-doctor`.
 
-## Command-line tools
+### Verify the native programs
 
-Create a profile extrusion from an image (or the clearest frame selected from a normal video by
-the legacy media converter):
+Use the programs' own help/version output before launching a real job:
 
-```powershell
-.venv\Scripts\cadpro.exe convert bracket.png --width-mm 120 --depth-mm 8 -o bracket.step
+```text
+ffmpeg -version
+ffmpeg -L
+ffprobe -version
+colmap -h
+InterfaceCOLMAP --help
+DensifyPointCloud --help
+ReconstructMesh --help
+RefineMesh --help
+TextureMesh --help
 ```
 
-Run the lower-level experimental turntable converter:
+There is no documented `colmap version` subcommand in the 4.1.1 CLI contract; CadPro probes
+`colmap -h`. Some OpenMVS programs print help and return nonzero, so `scan-doctor` accepts a
+nonempty help response as evidence that the executable started.
 
-```powershell
-.venv\Scripts\cadpro.exe turntable part.mp4 --width-mm 75 --views 24 -o part.step
+### CPU, GPU, memory, and disk expectations
+
+- COLMAP is always required for sparse camera reconstruction. `use_gpu=false` disables GPU use
+  for feature extraction and matching.
+- When the four core OpenMVS executables are available, CadPro uses the OpenMVS dense/mesh route.
+  This is the practical CPU route; OpenMVS build options may add their own acceleration.
+- Without a complete OpenMVS route, CadPro requires `use_gpu=true` and attempts COLMAP
+  PatchMatch, geometric fusion, and Poisson or Delaunay meshing. A no-CUDA COLMAP build will fail
+  this branch with an actionable error.
+- Texture projection currently comes only from OpenMVS `TextureMesh`. The COLMAP-only branch
+  publishes untextured GLB/OBJ and labels them accordingly.
+- Resource use depends strongly on input resolution, accepted view count, preset, scene detail,
+  and native build. A reasonable small-object starting point is a modern 4+ core CPU, 16 GiB RAM,
+  and 20–50 GiB free workspace. High-resolution/high-preset captures can need 32 GiB or more RAM
+  and well over 100 GiB of temporary disk. The COLMAP dense route needs a supported NVIDIA CUDA
+  GPU with enough VRAM for the chosen image size. These are planning estimates, not enforced
+  minimums or benchmarks from this machine.
+
+Quality presets change real native image-size limits:
+
+| Preset | COLMAP feature maximum edge | Dense undistortion maximum edge |
+| --- | ---: | ---: |
+| Draft | 1,600 px | 1,200 px |
+| Balanced | 2,400 px | 2,000 px |
+| High | 3,200 px | 3,200 px |
+
+## Capture guide
+
+Reconstruction quality depends heavily on overlap, lighting, surface texture, reflections,
+transparency, motion blur, camera calibration, and complete viewpoint coverage.
+
+For photos:
+
+1. Keep the object still and move the camera around it, or rotate it while keeping a trackable
+   background visible. Do not change the object between shots.
+2. Capture 20–50 original photos with roughly 60–80% overlap. Include a full waist-level orbit
+   plus higher and lower angles; keep the whole object in every frame.
+3. Use soft, even lighting and stable focus, exposure, focal length, and zoom. Avoid edited,
+   resized, filtered, or heavily compressed inputs.
+4. Add non-repeating visual texture around matte, featureless objects. Glossy, transparent,
+   translucent, very thin, deforming, or repetitive surfaces are poor photogrammetry targets.
+5. Keep hands, turntable supports, and moving shadows from covering important surfaces.
+6. When dimensions matter, include geometry on which two reconstructed points and their real
+   separation can later be identified precisely. CadPro does not silently infer units.
+
+For video, record one slow and steady 360-degree orbit with high and low coverage if possible,
+aiming for 20–50 useful selected views. Avoid autofocus pulsing, digital zoom, motion blur,
+pauses, rapid pans, and a featureless background. CadPro selects useful frames rather than
+sending hundreds of near-duplicates to COLMAP; review the generated contact sheet.
+
+## Website and `/api/v2`
+
+Run `cadpro scan-doctor` first, then start `cadpro web --no-open`. The website exposes capture,
+settings, progress, cancellation, result warnings, preview, calibration, and artifact downloads.
+The standard lane makes no external network request.
+
+### Capabilities
+
+```bash
+curl http://127.0.0.1:8000/api/v2/capabilities
 ```
 
-Compare two existing STEP files:
+This response reports individual native tools and derived photo, video, dense, texturing, mesh,
+and analytic-CAD capabilities. A missing tool required by the selected ingest mode or CPU route
+causes an actionable HTTP error before upload; a CUDA/runtime mismatch can still fail later when
+the native COLMAP dense stage starts.
 
-```powershell
-.venv\Scripts\cad-diff.exe old.step new.step --html diff.html
+### Submit photos
+
+Repeat `files=@...` for every view:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/api/v2/jobs/photos \
+  -F 'files=@capture/001.jpg' \
+  -F 'files=@capture/002.jpg' \
+  -F 'files=@capture/003.jpg' \
+  -F 'quality_preset=balanced' \
+  -F 'feature_matcher=exhaustive' \
+  -F 'mesher=poisson' \
+  -F 'use_gpu=false' \
+  -F 'generate_cad=true'
 ```
 
-The CLI turntable command is retained for scripts and has its own legacy sampling range. The
-website capability contract is 20–50 views.
+Three is only the API minimum; 20–50 is the recommended capture. Use `sequential` matching only
+when input order really follows the orbit. With no complete OpenMVS installation, `use_gpu=false`
+cannot run the dense stage.
 
-## STEP comparison
+### Submit a video
 
-The included `cad-diff` tool provides semantic version control for mechanical CAD. It matches
-solids and faces using volume, surface area, center of mass, bounding boxes, analytic surface
-types, adjacency, and residual topology, then independently checks added and removed volume with
-OpenCascade booleans. `--html out.html` creates a self-contained offline 3D report.
+```bash
+curl -i -X POST http://127.0.0.1:8000/api/v2/jobs/video \
+  -F 'file=@object-orbit.mp4' \
+  -F 'quality_preset=balanced' \
+  -F 'target_frames=40' \
+  -F 'maximum_duration_seconds=300' \
+  -F 'feature_matcher=sequential' \
+  -F 'mesher=poisson' \
+  -F 'use_gpu=false' \
+  -F 'generate_cad=true'
+```
 
-The bundled `examples/real_world/` corpus includes licensed SolidWorks and Fusion 360 exports.
-See `examples/real_world/NOTICE.md` for provenance and `docs/external-corpus.md` for the optional
-external corpus format.
+A successful submission returns `202`, a job snapshot, `Location` pointing at the status URL,
+and `Retry-After: 1`.
 
-## Technical truth and limitations
+### Poll, cancel, and download
 
-CadPro's measured reconstruction lane outputs one valid boundary-representation solid, but that
-does not mean the solid is an exact copy of the original object or a native parametric
-feature-history model. The optional Meshy and legacy Hunyuan lanes output polygon concept
-meshes, not boundary-representation solids.
+```bash
+curl http://127.0.0.1:8000/api/v2/jobs/JOB_ID
+curl -X POST http://127.0.0.1:8000/api/v2/jobs/JOB_ID/cancel
+curl -OJ http://127.0.0.1:8000/api/v2/jobs/JOB_ID/artifacts/visual-glb
+curl -OJ http://127.0.0.1:8000/api/v2/jobs/JOB_ID/artifacts/complete-bundle
+```
 
-One-photo mode cannot determine:
+Use artifact IDs returned in the completed job; not every conditional artifact exists. Download
+responses are private and `no-store`. Queued cancellation is immediate. Active cancellation sets
+a cancellation token and terminates, then kills if necessary, the current native child process.
 
-- the true depth, backside outline, or rear-face features;
-- pockets, steps, bosses, side holes, or other depth changes;
-- hidden cavities, internal structure, threads, tolerances, or material; or
-- whether a visible opening is a through-hole or a blind pocket.
+### Two-point scale and a new revision
 
-A neural checkpoint can learn statistical depth patterns from its labeled dataset, but that
-does not turn its prediction into an observation. Dataset bias, capture differences, and
-out-of-distribution objects can produce confident-looking but wrong depths. Always retain the
-measured width and independently verify the predicted dimension.
+An uncalibrated result remains in arbitrary reconstruction units and carries the warning
+“Scale is unknown; do not use dimensions for manufacturing.” It can have mesh artifacts, but it
+cannot have a STEP artifact.
 
-Photo-orbit and video modes add outside shape coverage, but a silhouette visual hull still
-cannot recover concavities, cavities, holes, or recesses that never affect an outline. It can
-also overfill space between visible limbs or features. It is not texture-based photogrammetry,
-neural radiance-field reconstruction, or native editable design history.
+After a job completes, select two distinct points in reconstructed coordinates and enter their
+measured separation:
 
-Every mode is sensitive to perspective, lens distortion, reflections, transparency, shadows
-connected to the object, blur, low contrast, thin features, changing zoom, bad photo order, and
-an incorrect real-world width. The visual hull assumes a centered object, fixed camera, even
-angular spacing, and one complete revolution.
+```bash
+curl -i -X POST http://127.0.0.1:8000/api/v2/jobs/JOB_ID/calibration \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "point_a": [0.12, -0.44, 1.08],
+    "point_b": [0.12, 0.56, 1.08],
+    "real_distance": 100.0,
+    "unit": "mm",
+    "selection_uncertainty": 0.01
+  }'
+```
 
-Before manufacturing:
+Units are `mm`, `cm`, `m`, or `in`. Scale factor is `real_distance / reconstructed_distance`;
+the reported uncertainty is the point-selection uncertainty multiplied by that factor. The
+endpoint returns a **new job ID**, records `calibration_revision_of`, and hard-links or copies
+the source inputs plus the completed job's immutable sparse cloud, dense cloud, mesh, and
+validated texture bundle when present. The revision reruns the downstream scale, mesh-export,
+CAD-fit, and artifact-validation stages; it does **not** rerun native camera estimation or
+multi-view stereo. Its report labels `pipeline_adapter` as `immutable-artifact-reuse` and records
+the source job ID. It does not mutate the original job or silently relabel its units. A source
+that is already calibrated, expired, missing artifacts, or has an invalid report cannot be used
+as the calibration source. Accuracy still depends on reconstruction and point placement.
 
-1. inspect the preview and reconstruction report;
-2. import STEP into a trusted CAD system and run its geometry checks;
-3. measure overall dimensions, holes, interfaces, wall thicknesses, and hidden features;
-4. remodel missing design intent and add tolerances, threads, and material requirements; and
-5. validate the final edited design against the physical object and its intended load case.
+## Audited native command contract
 
-Do not use inferred or advisory dimensions for safety-critical parts without independent
-measurement and qualified engineering review.
+CadPro does not concatenate upload data into shell command strings. It launches bounded argument
+arrays with isolated working directories, logs, timeouts, and cancellation. Paths below are
+placeholders; the option names and order match the current adapter.
 
-## Development and testing
+### FFprobe and FFmpeg 9.0.1
+
+```text
+ffprobe -v error -select_streams v:0 \
+  -show_entries format=format_name,duration,size:stream=index,codec_name,codec_type,width,height,pix_fmt,avg_frame_rate,r_frame_rate,nb_frames,duration \
+  -of json <video>
+
+ffmpeg -hide_banner -nostdin -v error -i <video> -map 0:v:0 \
+  -vf "select=isnan(prev_selected_t)+gte(t-prev_selected_t\,<spacing>),scale=<maximum-edge>:-2:force_original_aspect_ratio=decrease" \
+  -fps_mode vfr -frames:v <maximum-candidate-frames> -q:v 2 -n <candidate-%06d.jpg>
+```
+
+The use of current `-fps_mode vfr`, bounded `-frames:v`, and no-overwrite `-n` is deliberate.
+
+### COLMAP 4.1.1
+
+Before a job, CadPro probes every required subcommand with `colmap <command> -h`. The staged
+commands are:
+
+```text
+colmap feature_extractor --database_path <database.db> --image_path <images> \
+  --FeatureExtraction.max_image_size <preset-size> --FeatureExtraction.use_gpu <0|1>
+
+colmap <exhaustive_matcher|sequential_matcher> --database_path <database.db> \
+  --FeatureMatching.use_gpu <0|1>
+
+colmap mapper --database_path <database.db> --image_path <images> --output_path <sparse>
+
+colmap model_analyzer --path <each-sparse-component>
+
+colmap model_converter --input_path <selected-component> --output_path <sparse.ply> \
+  --output_type PLY
+
+colmap image_undistorter --image_path <images> --input_path <selected-component> \
+  --output_path <dense> --output_type COLMAP --max_image_size <preset-size>
+```
+
+Every directory under the sparse output is analyzed. CadPro selects the component with the most
+registered images, then the most points, and requires at least
+`max(3, ceil(accepted_images * 0.5))` registered cameras. It never assumes `sparse/0`.
+
+If OpenMVS is unavailable and GPU dense processing was requested, the remaining COLMAP commands
+are:
+
+```text
+colmap patch_match_stereo --workspace_path <dense> --workspace_format COLMAP \
+  --PatchMatchStereo.geom_consistency true
+
+colmap stereo_fusion --workspace_path <dense> --workspace_format COLMAP \
+  --input_type geometric --output_path <dense/fused.ply>
+
+colmap poisson_mesher --input_path <dense/fused.ply> --output_path <meshed-poisson.ply>
+```
+
+For Delaunay, the final line is:
+
+```text
+colmap delaunay_mesher --input_path <dense> --output_path <meshed-delaunay.ply>
+```
+
+The paired geometric-consistency and geometric-fusion options must remain aligned.
+
+### OpenMVS 2.4.0
+
+With all four core OpenMVS programs available, CadPro uses this sequence:
+
+```text
+InterfaceCOLMAP -i <absolute-colmap-dense> -o <scene.mvs> \
+  --image-folder <absolute-colmap-dense/images>
+
+DensifyPointCloud <scene.mvs> -o <scene_dense.mvs>
+
+ReconstructMesh <scene_dense.mvs> -p <scene_dense.ply> -o <scene_dense_mesh.mvs>
+
+RefineMesh <scene_dense.mvs> -m <scene_dense_mesh.ply> \
+  -o <scene_dense_mesh_refine.mvs> --scales 1 --max-face-area 16
+
+TextureMesh <scene_dense.mvs> -m <scene_dense_mesh_refine.ply> \
+  -o <native-textured/model_glb.mvs> --export-type glb
+
+TextureMesh <scene_dense.mvs> -m <scene_dense_mesh_refine.ply> \
+  -o <native-textured/model_obj.mvs> --export-type obj
+```
+
+Absolute InterfaceCOLMAP input and image-folder paths avoid 2.4.0's relative image-folder
+resolution trap. CadPro expects exactly one GLB and one OBJ when texturing is requested. The live
+OpenMVS wiki may describe newer `TransformScene --convert` behavior; that command is **not** part
+of CadPro's audited OpenMVS 2.4.0 sequence.
+
+## Artifacts and gates
+
+A completed native job can advertise only artifacts that exist, are nonempty, and pass their
+format-specific reopen checks:
+
+| Artifact ID | File/meaning | Publication gate |
+| --- | --- | --- |
+| `sparse-ply` | sparse camera/SfM points | native sparse model converted and reopened as finite PLY points |
+| `dense-ply` | dense MVS points | native dense cloud exists and reopens with finite points |
+| `mesh-ply` | cleaned triangle mesh | finite vertices/normals, valid indices, nonempty faces |
+| `visual-glb` | glTF 2.0 viewing mesh | valid GLB header/length and renderable mesh nodes; texture claim requires embedded linked UV/material/image data |
+| `mesh-obj` | exchange mesh | at least three vertices and a face; safe material references |
+| `texture-*` | MTL/image resources | only resources actually emitted and safely named |
+| `printable-stl` | watertight print mesh | zero boundary and non-manifold edges before export, then watertight after reopen |
+| `contact-sheet` | selected video views | video mode only |
+| `preview` | self-contained HTML viewer | source GLB validated first |
+| `fitted-step` | metric analytic box/cylinder B-rep | CAD requested, two-point scale known, fit accepted, valid positive-volume topology, one solid after reopen, matching volume and bounds |
+| `cad-script` | compact editable Python construction | emitted only with a validated fitted STEP |
+| `native-log-*` | bounded native diagnostics | up to 20 nonempty logs |
+| `report` | schema-validated reconstruction JSON | numerical metrics, settings, warnings, timings, tool versions, scale and fit details |
+| `manifest` | reproducibility JSON | input SHA-256 values, exact command arrays, configuration, versions, artifact metadata |
+| `complete-bundle` | ZIP of published outputs | safe unique basenames, nonempty entries, ZIP integrity check |
+
+Mesh cleanup removes degenerate/duplicate faces, unreferenced vertices, and only small
+disconnected fragments; it fills only simple triangle/quad holes. It does not force a fake
+watertight result. A missing STL or STEP is therefore a truthful conditional outcome, not an
+export bug by itself.
+
+Completed reports classify quality with visible underlying metrics:
+
+- **excellent:** at least 20 accepted images, at least 90% camera registration, no more than
+  0.8 px mean reprojection error when reported, at least 500,000 dense points, and one mesh
+  component;
+- **usable:** at least 12 accepted images, at least 70% registration, no more than 1.5 px
+  reprojection error when reported, and at least 100,000 dense points;
+- **weak:** every other completed result.
+
+A process error is a failed job rather than a completed result hidden behind a weak label.
+
+## Storage, queue, cancellation, and restart behavior
+
+`cadpro web` sets `CADPRO_STORAGE_DIR` when it is not already configured:
+
+- Windows: `%LOCALAPPDATA%\CadPro`;
+- Linux/macOS: `$XDG_DATA_HOME/cadpro`, or `~/.local/share/cadpro` when `XDG_DATA_HOME` is unset.
+
+The v3 scan store lives in the internal `scan-v2` subdirectory because its name follows the API
+schema version. Each UUID job has isolated inputs, work files, artifacts, and SQLite metadata.
+The queue is disk-backed with one worker and accepts four queued scan jobs by default. Uploads
+are streamed in chunks rather than loaded as one multipart body, and video candidate frames are
+bounded and removed after final selection.
+
+On restart, queued scan jobs are re-enqueued. A job that was `running` when the process stopped
+is marked failed with `worker_interrupted` and must be submitted again; CadPro does not pretend
+to resume halfway through an external native stage.
+
+Completed, failed, and cancelled `/api/v2` jobs have a default 24-hour retention period. A safe
+sweeper runs every 60 seconds and deletes expired SQLite records and their validated UUID job
+directories; queued or running jobs are not expired. Embedded deployments can set
+`create_app(job_retention_seconds=..., job_sweep_interval_seconds=...)`; a retention value of `0`
+disables automatic terminal-job cleanup. The `cadpro web` command does not currently expose
+those values as CLI options. Download or back up valuable artifacts and create a calibrated
+revision before its unscaled source expires. Do not delete a job directory while CadPro is
+running.
+
+The older `/api/jobs/*` manager has its own sweeper and the same default 24-hour terminal-job
+TTL; legacy and `/api/v2` job records remain separate.
+
+## Architecture
+
+```text
+Browser / API client
+        |
+        v
+FastAPI website + /api/v2 validation
+        |
+        v
+SQLite JobStore -> bounded persistent worker -> isolated UUID workspace
+        |                                      |
+        |                                      +-> FFprobe / FFmpeg (video)
+        |                                      +-> image quality gates
+        |                                      +-> COLMAP sparse SfM
+        |                                      +-> OpenMVS dense/mesh/texture
+        |                                          or COLMAP CUDA dense/mesh
+        |                                      +-> trimesh repair and mesh exports
+        |                                      +-> two-point scale
+        |                                      +-> box/cylinder fit + OCP STEP gate
+        v
+validated artifacts + report + manifest + ZIP
+```
+
+Relevant modules:
+
+```text
+src/cadpro/scan/api.py              /api/v2 validation, upload, status, cancel, calibration
+src/cadpro/scan/jobs.py             SQLite state machine, workspaces, restart, bounded worker
+src/cadpro/scan/capabilities.py     executable/Python probes and install hints
+src/cadpro/scan/video.py            FFprobe, FFmpeg, frame quality/selection, contact sheet
+src/cadpro/scan/quality.py          EXIF orientation, normalization, blur/exposure/features
+src/cadpro/scan/photogrammetry.py   staged COLMAP/OpenMVS adapter and test-only synthetic adapter
+src/cadpro/scan/mesh.py             finite geometry checks, conservative repair, GLB/OBJ/STL/PLY
+src/cadpro/scan/scale.py            explicit two-point scale and uncertainty
+src/cadpro/scan/cad_fit.py          robust primitive fits and metric analytic STEP export
+src/cadpro/scan/artifacts.py        reopen validation, hashes, report, manifest, preview, ZIP
+src/cadpro/scan/pipeline.py         state-machine orchestration and quality classification
+src/cadpro/web_assets/              bundled responsive website
+```
+
+## Docker limitation
+
+The included `Dockerfile` builds the Python 3.12 web/API shell, runs as a non-root user, stores
+data at `/var/lib/cadpro/jobs`, and checks `/api/health`. It intentionally does **not** install
+FFmpeg, FFprobe, COLMAP, OpenMVS, their runtime libraries, or CUDA/GPU wiring. Consequently the
+stock image can serve the site and capability errors but cannot perform a real photo/video scan.
+
+For native reconstruction, build and review a derived image that installs the pinned tools,
+persists `/var/lib/cadpro/jobs`, and—in the COLMAP dense case—configures the matching NVIDIA
+container runtime. Run `cadpro scan-doctor` inside that final image. Mounting host executables
+without their matching libraries is not a reliable installation.
+
+## Privacy and security
+
+- The standard `/api/v2` pipeline runs locally and has no paid-cloud dependency or telemetry.
+- Legacy optional AI providers are disabled unless an administrator configures them; see below.
+- Upload types, signatures, sizes, counts, dimensions, and duration are checked. Generated names
+  and ZIP entries are constrained, artifact lookup uses opaque IDs, and path traversal is
+  rejected.
+- Native programs receive argument arrays with `shell=False`, bounded captured output, timeouts,
+  cancellation, and per-job working directories.
+- Capture files, reports, logs, and models may contain proprietary geometry. Protect the storage
+  directory, keep the server on loopback by default, and add authentication/TLS before exposing
+  it to a network.
+- Diagnostic logs are sanitized and bounded, but administrators should still review them before
+  sharing a complete bundle.
+
+## Troubleshooting
+
+### “Dependency unavailable” before upload
+
+Run `cadpro scan-doctor --json`. Fix every required executable path and restart the server;
+capability detection is cached at application startup. Photos need COLMAP. Video also needs
+FFmpeg and FFprobe. Dense reconstruction needs the complete OpenMVS core or a working CUDA
+COLMAP dense build.
+
+### COLMAP starts manually but CadPro cannot start it
+
+`CADPRO_COLMAP_PATH` must identify a file. For the official Windows release, use its standard
+wrapper layout or point to `bin\colmap.exe` and ensure the archive's DLL directories are
+discoverable. CadPro does not run arbitrary `.bat` command strings.
+
+### CPU job says dense reconstruction is unavailable
+
+Install all four core OpenMVS executables and set their individual paths. Otherwise use a
+verified CUDA COLMAP build and submit with `use_gpu=true`; merely changing the flag cannot add
+CUDA support to a no-CUDA binary.
+
+### Few cameras register or several sparse components appear
+
+Add overlap and trackable detail, include intermediate angles, reduce blur/reflections, keep
+focus and zoom fixed, and avoid changing the scene. CadPro keeps the strongest connected
+component and reports discarded components; it will stop if fewer than half the accepted views
+register.
+
+### Video produces fewer than eight useful views
+
+Record a slower, sharper orbit with more viewpoint change and less repetition. The selector is
+designed to reject near-duplicate or blurry frames rather than inflate the view count.
+
+### GLB/OBJ is untextured
+
+Install a complete OpenMVS build including `TextureMesh`. CadPro also withholds the textured
+label if the exported model cannot prove linked texture data. The COLMAP-only branch is geometry
+only.
+
+### STL is missing
+
+The repaired mesh was not demonstrably watertight and manifold after reopen. Inspect the report's
+boundary edges, non-manifold edges, and component count, then repair deliberately in a mesh tool.
+
+### STEP is missing
+
+Confirm that CAD generation was enabled and scale was calibrated. STEP is still skipped unless
+the surface passes the supported axis-aligned box or right-cylinder fit and all OCP validation
+checks. Use the GLB/OBJ/PLY as reverse-engineering reference for more complex parts.
+
+### A job failed after restart
+
+If it was running when the process exited, this is intentional `worker_interrupted` recovery.
+Submit the capture again. Queued jobs are restored, but native programs are not checkpointed
+mid-command.
+
+### Calibration says the source artifacts are unavailable
+
+Calibration is allowed only from a completed, unscaled job with an intact schema-valid report
+and immutable sparse/dense/mesh artifacts. The default retention sweeper removes terminal jobs
+after 24 hours. Calibrate before that deadline, or retain the original capture and submit a new
+native job. A calibrated revision reuses the source reconstruction artifacts and does not spend
+time rerunning COLMAP/OpenMVS.
+
+## Development and verification
+
+Run all three checks from an installed development environment.
+
+Windows:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m mypy src/cadpro/scan
 ```
 
-The end-to-end suite builds actual one-photo, 20-photo, and turntable-video reconstructions,
-downloads every measured artifact, and reloads the generated STEP solids. External-provider
-tests must use mocked provider responses; the normal test suite should not spend Meshy credits
-or upload test fixtures to a third party.
+Linux/macOS:
 
-```text
-src/cadpro/web.py          measured/text APIs, job queue, request guards, artifact security
-src/cadpro/web_assets/     responsive capture, calibration, progress, and result interface
-src/cadpro/reconstruct.py  profile extrusion and ordered silhouette visual-hull reconstruction
-src/cadpro/neural.py       trainable depth model, safe checkpoints, image features, STEP inference
-src/cadpro/enrichment.py   optional OpenAI vision and cited web-reference report enrichment
-src/cadpro/meshy.py        optional hosted Meshy tasks and validated visual-mesh exports
-src/cadpro/ml_mesh.py      optional external concept-mesh worker client and GLB validation
-src/cadpro/artifacts.py    STEP/STL/GLB/preview/report export and verification
-src/cadpro/media.py        decoding, frame sampling, segmentation, and contour extraction
-src/cadpro/step.py         OpenCascade B-rep construction and visual-hull booleans
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check src tests
+.venv/bin/python -m mypy src/cadpro/scan
 ```
+
+The fast API end-to-end test injects `SyntheticTestAdapter` explicitly and verifies job creation,
+processing, report/artifact validation, downloads, calibration, cancellation, and missing-tool
+behavior without running native photogrammetry. Native command tests mock process boundaries and
+assert safe exact argv arrays. These tests prove the surrounding application and adapter
+contract; they do not prove that a real capture reconstructs on a particular machine.
+
+`tests/integration/test_real_scan_api.py` is the opt-in real-capture test. It accepts direct-child
+JPEG, PNG, or WebP files from a private local directory (at least 3, with 20–50 recommended),
+runs the real `/api/v2` adapter, polls for up to 30 minutes, downloads/reopens the advertised
+artifacts, and checks the report, hashes, manifest command provenance, and ZIP. It skips during a
+normal test run unless the dataset and native capabilities are available.
+
+Windows:
+
+```powershell
+$env:CADPRO_REAL_SCAN_DATASET = "C:\absolute\path\to\rights-cleared-photos"
+.venv\Scripts\python.exe -m pytest -m integration tests/integration/test_real_scan_api.py
+```
+
+Linux/macOS:
+
+```bash
+CADPRO_REAL_SCAN_DATASET=/absolute/path/to/rights-cleared-photos \
+  .venv/bin/python -m pytest -m integration tests/integration/test_real_scan_api.py
+```
+
+No dataset was configured and this integration test was skipped on the Windows host described
+at the top of this README. After a real run, inspect camera registration and the models
+independently, calibrate two points through the website/API, and reopen any conditional STEP in
+Onshape, FreeCAD, or another CAD system. Record the exact report and manifest rather than
+claiming native success from mocked tests alone.
+
+## Dependency licenses
+
+Review the exact binaries and build options you distribute; this summary is not legal advice.
+
+- COLMAP itself uses the [new BSD license](https://github.com/colmap/colmap/blob/4.1.1/COPYING.txt),
+  while its dependencies have separate terms that can affect a binary distribution.
+- OpenMVS is [AGPL-licensed and includes third-party notices](https://github.com/cdcseacave/openMVS/blob/v2.4.0/COPYRIGHT.md).
+  Its 2.4.0 notice lists, among other components, an `ibfs` research-purpose restriction. Review
+  the complete archive and obtain legal guidance before operating or distributing it in a hosted
+  or commercial service.
+- FFmpeg is normally LGPL 2.1-or-later, but enabling GPL components makes the whole FFmpeg build
+  GPL; inspect `ffmpeg -L` and `ffmpeg -buildconf` and follow the
+  [official legal guidance](https://ffmpeg.org/legal.html).
+- The OCP binding carries the
+  [Open CASCADE LGPL 2.1 exception terms](https://github.com/CadQuery/OCP/blob/7.9.3.1/LICENSE).
+- This repository currently has no top-level `LICENSE` file. Do not assume permission to
+  redistribute CadPro itself until the maintainers add an explicit project license.
+
+## Legacy v2 tools and providers
+
+The repository still contains the older measured-silhouette and optional generative workflows
+for compatibility. They are **not** the `/api/v2` photogrammetry lane, are not a fallback when
+native tools are missing, and the CadPro 3.0 website must not be assumed to expose all of them.
+Inspect `cadpro --help` and the legacy API source before integrating them.
+
+- `cadpro convert` builds a measured 2.5D profile extrusion from one image or one selected video
+  frame using explicit width and depth.
+- `cadpro turntable` builds an ordered silhouette visual hull from 4–24 video views and an
+  explicit maximum width. It is silhouette geometry, not texture-based photogrammetry.
+- `cadpro neural-train` and `cadpro neural-predict` train/load a data-only NPZ depth-ratio model.
+  Prediction still needs a measured width and remains an estimate of hidden depth.
+- Legacy HTTP handlers remain under `/api/jobs/image`, `/api/jobs/photos`, `/api/jobs/video`, and
+  `/api/jobs/text`; they use a separate in-memory worker/retention model and should not be mixed
+  with `/api/v2/jobs/*` IDs.
+- The optional Meshy provider is enabled only with `CADPRO_MESHY_ENABLED=1` and a server-side
+  `MESHY_API_KEY`. It can submit text, one image, or at most four selected representative views
+  and publish non-metric visual mesh assets. Meshy output is never STEP. Review Meshy's live
+  [authentication](https://docs.meshy.ai/en/api/authentication),
+  [image-to-3D](https://docs.meshy.ai/en/api/image-to-3d),
+  [multi-image](https://docs.meshy.ai/en/api/multi-image-to-3d),
+  [pricing](https://docs.meshy.ai/en/api/pricing), and
+  [terms](https://www.meshy.ai/terms-of-use) before sending any capture or spending credits.
+- `src/cadpro/ml_mesh.py` retains an administrator-operated Hunyuan-compatible concept-mesh
+  seam. It is disabled by default, externally hosted, non-metric, and never supplies STEP
+  geometry. Review the exact worker revision and its license before enabling it.
+
+Legacy measured silhouette/neural STEP files and v3 fitted STEP files have different evidence
+and assumptions. Their reports must remain attached so a downstream user can tell how each
+model was produced.
+
+## Known limitations
+
+- Photogrammetry reconstructs visible surfaces, not hidden cavities, threads, tolerances,
+  material, manufacturing intent, or a native parametric feature tree.
+- Scale from one selected point pair corrects global size; it does not remove local warp or lens,
+  camera, matching, and surface errors.
+- Current analytic export recognizes only a simple axis-aligned box or right cylinder. Planes are
+  useful diagnostics but are not independently exported as solids.
+- Texture generation depends on OpenMVS and suitable photos. A valid untextured mesh can still be
+  a successful geometric result.
+- Mesh repair is conservative. Complex holes and non-manifold regions are reported, not silently
+  filled into invented surfaces.
+- One photograph cannot support the standard v3 scan. Legacy or cloud generative approximations
+  are separate, inferred, and non-equivalent workflows.
+- Native-tool compatibility has been checked against upstream 4.1.1/2.4.0/9.0.1 contracts, but
+  not executed on the current Windows host.
+
+Never manufacture a safety-critical part directly from a reconstruction. Verify overall size,
+interfaces, holes, wall thickness, hidden features, tolerances, and material with independent
+measurement and qualified engineering review.
 
 ## Contributors
 

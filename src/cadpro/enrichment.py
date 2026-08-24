@@ -16,7 +16,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from PIL import Image, ImageOps, UnidentifiedImageError

@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="CadPro" \
+      org.opencontainers.image.description="CadPro API and website shell; native FFmpeg, COLMAP, and OpenMVS executables are not bundled"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     CADPRO_STORAGE_DIR=/var/lib/cadpro/jobs

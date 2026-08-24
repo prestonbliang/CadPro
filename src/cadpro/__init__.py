@@ -1,3 +1,3 @@
-"""CadPro: measured media-to-STEP and optional generative visual 3D assets."""
+"""CadPro: local photogrammetry, explicit mesh products, and fitted analytic CAD."""
 
-__version__ = "2.2.0"
+__version__ = "3.0.0"

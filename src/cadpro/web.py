@@ -45,6 +45,16 @@ from cadpro.media import (
 from cadpro.ml_mesh import ConceptMeshConfig
 from cadpro.meshy import MeshyConfig, MeshyOptions
 from cadpro.neural import NeuralCheckpointError, NeuralConfig, NeuralDepthModel
+from cadpro.scan.api import ScanApiError, create_scan_router
+from cadpro.scan.capabilities import default_toolchain
+from cadpro.scan.jobs import JobStore, PersistentScanService
+from cadpro.scan.models import ToolchainCapabilities
+from cadpro.scan.photogrammetry import (
+    ColmapOpenMvsAdapter,
+    PhotogrammetryAdapter,
+    SyntheticTestAdapter,
+)
+from cadpro.scan.pipeline import ScanPipeline
 
 
 MIN_PHOTOS = 20
@@ -934,7 +944,13 @@ class RequestGuardMiddleware:
             "/api/jobs/photos": photo_request_bytes,
             "/api/jobs/video": video_request_bytes,
             "/api/jobs/text": text_request_bytes,
+            "/api/v2/jobs/photos": photo_request_bytes,
+            "/api/v2/jobs/video": video_request_bytes,
+            "/api/v2/jobs/single-image": image_request_bytes,
         }
+        self._legacy_upload_paths = frozenset(
+            {"/api/jobs/image", "/api/jobs/photos", "/api/jobs/video", "/api/jobs/text"}
+        )
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -954,6 +970,13 @@ class RequestGuardMiddleware:
         path = str(scope.get("path", ""))
         method = str(scope.get("method", "GET")).upper()
         request_limit = self._request_limits.get(path) if method == "POST" else None
+        if (
+            request_limit is None
+            and method == "POST"
+            and path.startswith("/api/v2/jobs/")
+            and (path.endswith("/cancel") or path.endswith("/calibration"))
+        ):
+            request_limit = DEFAULT_MAX_TEXT_REQUEST_BYTES
         if request_limit is None:
             await self.app(scope, receive, send)
             return
@@ -991,7 +1014,11 @@ class RequestGuardMiddleware:
             return
 
         manager = getattr(scope.get("app", object()), "state", None)
-        manager = getattr(manager, "job_manager", None)
+        manager = (
+            getattr(manager, "job_manager", None)
+            if path in self._legacy_upload_paths
+            else None
+        )
         reservation: UUID | None = None
         if manager is not None:
             reservation = manager.reserve_upload()
@@ -1068,6 +1095,10 @@ def create_app(
     max_pending_jobs: int = DEFAULT_MAX_PENDING_JOBS,
     request_overhead_bytes: int = DEFAULT_REQUEST_OVERHEAD_BYTES,
     trusted_hosts: Sequence[str] | None = None,
+    scan_storage_parent: str | Path | None = None,
+    scan_adapter: PhotogrammetryAdapter | None = None,
+    scan_capabilities: ToolchainCapabilities | None = None,
+    scan_max_queued: int = 4,
 ) -> FastAPI:
     """Build the application; injectable limits and runner keep API tests lightweight."""
     for name, value in (
@@ -1085,6 +1116,8 @@ def create_app(
         raise ValueError("max_pending_jobs must be positive")
     if request_overhead_bytes < 0:
         raise ValueError("request_overhead_bytes cannot be negative")
+    if scan_max_queued <= 0:
+        raise ValueError("scan_max_queued must be positive")
 
     assets = Path(asset_dir).resolve() if asset_dir is not None else ASSET_DIR.resolve()
     public_origin = _configured_public_origin()
@@ -1111,6 +1144,14 @@ def create_app(
             meshy_config=meshy_config,
         )
     )
+    active_scan_capabilities = scan_capabilities or default_toolchain()
+    active_scan_adapter = scan_adapter or ColmapOpenMvsAdapter(active_scan_capabilities)
+    if scan_storage_parent is not None:
+        active_scan_storage: Path | None = Path(scan_storage_parent).expanduser().resolve()
+    elif storage_parent is not None:
+        active_scan_storage = Path(storage_parent).expanduser().resolve() / "scan-v2"
+    else:
+        active_scan_storage = None
     image_request_bytes = max_image_bytes + request_overhead_bytes
     photo_request_bytes = min(
         max_photo_set_bytes, max_image_bytes * MAX_PHOTOS
@@ -1128,10 +1169,30 @@ def create_app(
             max_pending_jobs=max_pending_jobs,
         )
         application.state.job_manager = manager
+        scan_temporary: tempfile.TemporaryDirectory[str] | None = None
+        if active_scan_storage is None:
+            scan_temporary = tempfile.TemporaryDirectory(prefix="cadpro-scan-")
+            scan_root = Path(scan_temporary.name)
+        else:
+            scan_root = active_scan_storage
+        scan_store = JobStore(scan_root)
+        scan_service = PersistentScanService(
+            scan_store,
+            ScanPipeline(active_scan_adapter, capabilities=active_scan_capabilities),
+            maximum_queued=scan_max_queued,
+            retention_seconds=job_retention_seconds,
+            sweep_interval_seconds=job_sweep_interval_seconds,
+        )
+        application.state.scan_store = scan_store
+        application.state.scan_service = scan_service
+        application.state.scan_test_adapter = isinstance(active_scan_adapter, SyntheticTestAdapter)
         try:
             yield
         finally:
+            await asyncio.to_thread(scan_service.close)
             await asyncio.to_thread(manager.close)
+            if scan_temporary is not None:
+                scan_temporary.cleanup()
 
     application = FastAPI(
         title="CadPro",
@@ -1145,6 +1206,18 @@ def create_app(
 
     @application.exception_handler(ApiError)
     async def api_error_handler(_request: Request, error: ApiError) -> JSONResponse:
+        payload: dict[str, Any] = {
+            "error": {"code": error.code, "message": error.message}
+        }
+        if error.details:
+            payload["error"]["details"] = error.details
+        headers = {"Retry-After": "5"} if error.code == "job_queue_full" else None
+        return JSONResponse(payload, status_code=error.status_code, headers=headers)
+
+    @application.exception_handler(ScanApiError)
+    async def scan_api_error_handler(
+        _request: Request, error: ScanApiError
+    ) -> JSONResponse:
         payload: dict[str, Any] = {
             "error": {"code": error.code, "message": error.message}
         }
@@ -1223,6 +1296,22 @@ def create_app(
                 "photo_set": {"maximum_bytes": max_photo_set_bytes},
                 "video_file": {"maximum_bytes": max_video_bytes},
                 "dimension_mm": {"maximum": MAX_WIDTH_MM},
+            },
+            "photogrammetry": {
+                "api": "/api/v2",
+                "adapter": active_scan_adapter.name,
+                "photo_reconstruction": active_scan_capabilities.photo_reconstruction,
+                "video_ingest": active_scan_capabilities.video_ingest,
+                "dense_reconstruction": active_scan_capabilities.dense_reconstruction,
+                "texture_generation": active_scan_capabilities.texture_generation,
+                "mesh_processing": active_scan_capabilities.mesh_processing,
+                "analytic_cad": active_scan_capabilities.analytic_cad,
+                "tools": {
+                    key: capability.model_dump(mode="json", exclude={"executable"})
+                    for key, capability in active_scan_capabilities.tools.items()
+                },
+                "standard_pipeline_uses_paid_cloud": False,
+                "legacy_silhouette_fallback": False,
             },
             "intelligence": {
                 "available": intelligence_config.available,
@@ -1685,6 +1774,8 @@ def create_app(
                 "X-Frame-Options": "SAMEORIGIN",
             },
         )
+
+    application.include_router(create_scan_router(active_scan_capabilities))
 
     application.mount(
         "/static",

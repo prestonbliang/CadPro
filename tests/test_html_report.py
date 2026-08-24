@@ -73,3 +73,20 @@ def test_report_has_no_premature_script_close_and_is_reasonably_sized():
     script_close_count = html.count("</script>")
     assert script_open_count == script_close_count
     assert len(html) > 1_000_000  # the vendored three.js alone is >2MB base64-encoded
+
+
+def test_report_exposes_view_controls_bounds_and_calibration_point_messages():
+    html = _render_fillet_report()
+
+    for control_id in (
+        "viewer-grid",
+        "viewer-axes",
+        "viewer-wireframe",
+        "viewer-normals",
+        "viewer-texture",
+        "model-bounds",
+        "picked-points",
+    ):
+        assert f'id="{control_id}"' in html
+    assert 'type: "cadpro-point-picked"' in html
+    assert 'renderer.domElement.addEventListener("dblclick"' in html

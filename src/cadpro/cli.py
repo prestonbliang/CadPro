@@ -15,7 +15,36 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 @app.callback()
 def main() -> None:
-    """Train image-to-CAD models, create validated STEP solids, and compare geometry."""
+    """Run truthful photo/video reconstruction, inspect dependencies, or use legacy CAD tools."""
+
+
+@app.command("scan-doctor")
+def scan_doctor(
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+) -> None:
+    """Detect the exact local tools available to the real photogrammetry pipeline."""
+
+    from cadpro.scan.capabilities import detect_toolchain
+
+    capabilities = detect_toolchain()
+    if json_output:
+        typer.echo(capabilities.model_dump_json(indent=2))
+        return
+    typer.echo("CadPro real reconstruction dependency check")
+    for capability in capabilities.tools.values():
+        status = "READY" if capability.available else "MISSING"
+        detail = capability.version or capability.reason or ""
+        typer.echo(f"[{status:7}] {capability.name}: {detail}")
+        if not capability.available and capability.install_hint:
+            typer.echo(f"          {capability.install_hint}")
+    typer.echo(
+        "Photo SfM: "
+        + ("ready" if capabilities.photo_reconstruction else "unavailable")
+        + " | Video ingest: "
+        + ("ready" if capabilities.video_ingest else "unavailable")
+        + " | Camera texturing: "
+        + ("ready" if capabilities.texture_generation else "unavailable")
+    )
 
 
 @app.command()
@@ -176,6 +205,7 @@ def web(
     url_host = f"[{display_host}]" if ":" in display_host else display_host
     url = f"http://{url_host}:{port}"
     os.environ.setdefault("CADPRO_PUBLIC_ORIGIN", url)
+    os.environ.setdefault("CADPRO_STORAGE_DIR", str(_default_storage_directory()))
     if open_browser:
         browser_timer = threading.Timer(1.0, lambda: webbrowser.open(url))
         browser_timer.daemon = True
@@ -188,6 +218,14 @@ def web(
         log_level="info",
         proxy_headers=False,
     )
+
+
+def _default_storage_directory() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "CadPro"
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "cadpro"
 
 
 if __name__ == "__main__":

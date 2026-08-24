@@ -1,13 +1,13 @@
 [project]
 name = "cadpro"
-version = "2.2.0"
-description = "Create validated measured STEP models and optional generative visual 3D assets from text, images, or video."
+version = "3.0.0"
+description = "Local photo and video photogrammetry with truthful mesh, point-cloud, and fitted-CAD exports."
 readme = "README.md"
 authors = [
     { name = "Preston L" },
     { name = "Ethan C", email = "yil91974@gmail.com" },
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "cadquery-ocp-novtk",
     "numpy",
@@ -22,11 +22,13 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
+    "pydantic>=2.10,<3",
+    "trimesh>=4.8,<5",
     "openai>=2.0,<3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx>=0.27"]
+dev = ["pytest", "httpx>=0.27", "ruff>=0.12", "mypy>=1.17"]
 
 [project.scripts]
 cadpro = "cadpro.cli:app"
@@ -42,3 +44,26 @@ where = ["src"]
 [tool.setuptools.package-data]
 cad_diff = ["viewer/*.j2", "viewer/*.js", "viewer/vendor/*.js"]
 cadpro = ["web_assets/*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/cadpro/scan"]
+check_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+no_site_packages = true
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: opt-in tests that invoke installed native tools and local datasets",
+]

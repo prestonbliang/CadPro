@@ -16,6 +16,7 @@ from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
 from OCP.GProp import GProp_GProps
 from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
 from OCP.IFSelect import IFSelect_RetDone
+from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
 from OCP.TopAbs import TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
@@ -130,6 +131,10 @@ def write_step(shape: TopoDS_Shape, output: str | Path) -> Path:
         )
         os.close(descriptor)
         temporary = Path(temporary_name)
+        # The photogrammetry CAD gate converts explicit user calibration to millimetres;
+        # legacy measured paths are also defined in millimetres. Embed that unit in STEP.
+        Interface_Static.SetCVal_s("xstep.cascade.unit", "MM")
+        Interface_Static.SetCVal_s("write.step.unit", "MM")
         writer = STEPControl_Writer()
         if writer.Transfer(shape, STEPControl_AsIs) != IFSelect_RetDone:
             raise RuntimeError("OpenCascade could not transfer the generated body to STEP")
