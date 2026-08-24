@@ -1,7 +1,7 @@
 [project]
 name = "cadpro"
-version = "2.1.0"
-description = "Learn bounded CAD parameters from images and reconstruct validated STEP and 3D assets."
+version = "2.2.0"
+description = "Create validated measured STEP models and optional generative visual 3D assets from text, images, or video."
 readme = "README.md"
 authors = [
     { name = "Preston L" },

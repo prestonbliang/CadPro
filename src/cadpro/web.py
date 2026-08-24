@@ -43,6 +43,7 @@ from cadpro.media import (
     validated_image_size,
 )
 from cadpro.ml_mesh import ConceptMeshConfig
+from cadpro.meshy import MeshyConfig, MeshyOptions
 from cadpro.neural import NeuralCheckpointError, NeuralConfig, NeuralDepthModel
 
 
@@ -58,9 +59,11 @@ DEFAULT_JOB_SWEEP_SECONDS = 60.0
 DEFAULT_MAX_PENDING_JOBS = 2
 DEFAULT_PUBLIC_ORIGIN = "http://127.0.0.1:8000"
 DEFAULT_REQUEST_OVERHEAD_BYTES = 2 * 1024 * 1024
+DEFAULT_MAX_TEXT_REQUEST_BYTES = 64 * 1024
 RESEARCH_FRAME_MAX_EDGE = 1_024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_WIDTH_MM = 1_000_000.0
+MAX_PROMPT_CHARS = 600
 
 ASSET_DIR = Path(__file__).with_name("web_assets")
 INDEX_FILE = ASSET_DIR / "index.html"
@@ -101,6 +104,8 @@ _GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
 _ARTIFACT_SUFFIXES = {
     ".glb",
     ".gltf",
+    ".3mf",
+    ".fbx",
     ".html",
     ".jpeg",
     ".jpg",
@@ -157,7 +162,7 @@ class Artifact:
 @dataclass
 class Job:
     job_id: UUID
-    kind: Literal["image", "photos", "video"]
+    kind: Literal["image", "photos", "video", "text"]
     root: Path
     input_dir: Path
     output_dir: Path
@@ -222,9 +227,10 @@ class StagedJob:
 class JobManifest:
     """Combine validated CAD exports with optional supplemental job artifacts."""
 
-    cad: object
+    cad: object | None
     concept_mesh_path: Path | None = None
     concept_mesh: Mapping[str, Any] | None = None
+    visual_asset: object | None = None
 
 
 ReconstructionRunner = Callable[[Job], object]
@@ -339,7 +345,7 @@ class JobManager:
         self,
         stage: StagedJob,
         *,
-        kind: Literal["image", "photos", "video"],
+        kind: Literal["image", "photos", "video", "text"],
         input_paths: Sequence[Path],
         parameters: Mapping[str, Any],
     ) -> Job:
@@ -494,7 +500,9 @@ class JobManager:
                     job.status = "failed"
                     job.advance("complete", 100)
                     job.error = {
-                        "code": "reconstruction_failed",
+                        "code": (
+                            "generation_failed" if job.kind == "text" else "reconstruction_failed"
+                        ),
                         "message": _safe_worker_error(error, job.root),
                     }
                     job.finished_at = datetime.now(timezone.utc)
@@ -547,6 +555,8 @@ def _run_reconstruction(
     job: Job,
     *,
     neural_model: NeuralDepthModel | None = None,
+    concept_mesh_config: ConceptMeshConfig | None = None,
+    meshy_config: MeshyConfig | None = None,
 ) -> object:
     """The one integration seam between the web queue and reconstruction engine."""
     from cadpro.artifacts import export_artifacts
@@ -562,11 +572,45 @@ def _run_reconstruction(
         ConceptMeshError,
         generate_concept_mesh,
     )
+    from cadpro.meshy import MeshyError, generate_meshy_asset
     from cadpro.reconstruct import (
         reconstruct_photo_set,
         reconstruct_single_image,
         reconstruct_turntable_video,
     )
+
+    active_meshy_config = meshy_config or MeshyConfig.from_env()
+    active_concept_config = concept_mesh_config or ConceptMeshConfig.from_env()
+
+    if job.kind == "text":
+        if not active_meshy_config.available:
+            raise RuntimeError("Text-to-3D generation is unavailable on this server.")
+        job.advance("research", 24)
+        try:
+            generated = generate_meshy_asset(
+                job.output_dir,
+                prompt=str(job.parameters["prompt"]),
+                config=active_meshy_config,
+                options=_meshy_options(job.parameters),
+                stem="cadpro-ai-asset",
+            )
+        except MeshyError:
+            raise
+        metadata = {
+            "status": "completed",
+            **dict(generated.metadata),
+            "input_strategy": "text_prompt",
+            "source_mode": "text",
+            "warnings": list(generated.warnings),
+        }
+        job.advance("reconstruct", 82)
+        job.advance("export", 94)
+        return JobManifest(
+            cad=None,
+            concept_mesh_path=generated.glb_path,
+            concept_mesh=metadata,
+            visual_asset=generated,
+        )
 
     enrichment: dict[str, Any] | None = None
     neural_prediction: dict[str, Any] | None = None
@@ -650,18 +694,54 @@ def _run_reconstruction(
     job.advance("export", 86)
     cad_manifest = export_artifacts(reconstruction, job.output_dir, stem="cadpro-model")
 
+    visual_asset: object | None = None
     if job.parameters.get("concept_mesh"):
         job.advance("export", 94)
         if reference_images is None:
             concept_mesh = _failed_concept_mesh_metadata(
-                reference_error or "A representative image was unavailable."
+                reference_error or "A representative image was unavailable.",
+                provider=("meshy" if active_meshy_config.available else None),
             )
+        elif active_meshy_config.available:
+            selected_images = _select_meshy_reference_images(reference_images)
+            try:
+                generated = generate_meshy_asset(
+                    job.output_dir,
+                    prompt=str(job.parameters.get("object_hint", "")).strip() or None,
+                    image_paths=selected_images,
+                    config=active_meshy_config,
+                    options=_meshy_options(job.parameters),
+                    stem="cadpro-ai-concept",
+                )
+                visual_asset = generated
+                concept_mesh_path = generated.glb_path
+                concept_mesh = {
+                    "status": "completed",
+                    **dict(generated.metadata),
+                    "input_strategy": (
+                        "single_reference"
+                        if len(selected_images) == 1
+                        else "evenly_spaced_multi_view"
+                    ),
+                    "source_mode": job.kind,
+                    "source_view_count": len(selected_images),
+                    "warnings": list(generated.warnings),
+                }
+            except MeshyError as error:
+                concept_mesh = _failed_concept_mesh_metadata(
+                    str(error), provider="meshy"
+                )
+            except Exception:
+                concept_mesh = _failed_concept_mesh_metadata(
+                    "AI visual-asset generation failed; validated CAD exports are still available.",
+                    provider="meshy",
+                )
         else:
             try:
                 generated = generate_concept_mesh(
                     reference_images[0],
                     job.output_dir,
-                    config=ConceptMeshConfig.from_env(),
+                    config=active_concept_config,
                 )
                 concept_mesh_path = generated.glb_path
                 concept_mesh = {
@@ -693,13 +773,18 @@ def _run_reconstruction(
         cad=cad_manifest,
         concept_mesh_path=concept_mesh_path,
         concept_mesh=concept_mesh,
+        visual_asset=visual_asset,
     )
 
 
-def _failed_concept_mesh_metadata(warning: str) -> dict[str, Any]:
+def _failed_concept_mesh_metadata(
+    warning: str,
+    *,
+    provider: str | None = None,
+) -> dict[str, Any]:
     return {
         "status": "failed",
-        "provider": "hunyuan-compatible-worker",
+        "provider": provider or "hunyuan-compatible-worker",
         "artifact_kind": "ai_concept_mesh",
         "format": "glb",
         "metric_scale": False,
@@ -812,6 +897,21 @@ def _representative_image_paths(job: Job, maximum: int = 6) -> tuple[Path, ...]:
         capture.release()
 
 
+def _select_meshy_reference_images(
+    paths: Sequence[Path],
+    maximum: int = 4,
+) -> tuple[Path, ...]:
+    """Choose stable, evenly spaced views within Meshy's documented 1-4 image limit."""
+    if maximum <= 0:
+        raise ValueError("maximum must be positive")
+    if not paths:
+        raise ValueError("At least one representative image is required.")
+    if len(paths) <= maximum:
+        return tuple(paths)
+    indices = tuple((index * len(paths)) // maximum for index in range(maximum))
+    return tuple(paths[index] for index in indices)
+
+
 class RequestGuardMiddleware:
     """Reject untrusted browser requests and oversized uploads before endpoint parsing."""
 
@@ -824,6 +924,7 @@ class RequestGuardMiddleware:
         image_request_bytes: int,
         photo_request_bytes: int,
         video_request_bytes: int,
+        text_request_bytes: int = DEFAULT_MAX_TEXT_REQUEST_BYTES,
     ) -> None:
         self.app = app
         self._public_origin = _canonical_origin(public_origin)
@@ -832,6 +933,7 @@ class RequestGuardMiddleware:
             "/api/jobs/image": image_request_bytes,
             "/api/jobs/photos": photo_request_bytes,
             "/api/jobs/video": video_request_bytes,
+            "/api/jobs/text": text_request_bytes,
         }
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -989,6 +1091,7 @@ def create_app(
     allowed_hosts = _configured_trusted_hosts(public_origin, trusted_hosts)
     intelligence_config = EnrichmentConfig.from_env()
     concept_mesh_config = ConceptMeshConfig.from_env()
+    meshy_config = MeshyConfig.from_env()
     neural_config = NeuralConfig.from_env()
     neural_model: NeuralDepthModel | None = None
     neural_checkpoint_valid = False
@@ -1001,13 +1104,19 @@ def create_app(
     runner = (
         reconstruction_runner
         if reconstruction_runner is not None
-        else lambda job: _run_reconstruction(job, neural_model=neural_model)
+        else lambda job: _run_reconstruction(
+            job,
+            neural_model=neural_model,
+            concept_mesh_config=concept_mesh_config,
+            meshy_config=meshy_config,
+        )
     )
     image_request_bytes = max_image_bytes + request_overhead_bytes
     photo_request_bytes = min(
         max_photo_set_bytes, max_image_bytes * MAX_PHOTOS
     ) + request_overhead_bytes
     video_request_bytes = max_video_bytes + request_overhead_bytes
+    text_request_bytes = DEFAULT_MAX_TEXT_REQUEST_BYTES
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -1028,8 +1137,8 @@ def create_app(
         title="CadPro",
         version=__version__,
         description=(
-            "Turn one object image, an ordered photo set, or a turntable video "
-            "into downloadable CAD artifacts."
+            "Turn measured object captures into validated CAD, or generate an explicitly "
+            "non-metric visual 3D asset from text or reference images."
         ),
         lifespan=lifespan,
     )
@@ -1078,6 +1187,7 @@ def create_app(
         image_request_bytes=image_request_bytes,
         photo_request_bytes=photo_request_bytes,
         video_request_bytes=video_request_bytes,
+        text_request_bytes=text_request_bytes,
     )
 
     @application.get("/", include_in_schema=False)
@@ -1138,12 +1248,40 @@ def create_app(
                 ),
             },
             "concept_mesh": {
-                "available": concept_mesh_config.available,
-                "provider": "hunyuan-compatible-worker",
+                "available": meshy_config.available or concept_mesh_config.available,
+                "provider": (
+                    "meshy"
+                    if meshy_config.available
+                    else "hunyuan-compatible-worker"
+                ),
                 "format": "glb",
                 "metric_scale": False,
                 "manufacturing_cad": False,
                 "replaces_step": False,
+                "multi_view_maximum": 4 if meshy_config.available else 1,
+                "textured": meshy_config.available,
+                "pbr": meshy_config.available,
+                "rigging": meshy_config.available,
+            },
+            "generative_mesh": {
+                "available": meshy_config.available,
+                "provider": "meshy",
+                "text_to_3d": meshy_config.available,
+                "image_to_3d": meshy_config.available,
+                "multi_image_to_3d": meshy_config.available,
+                "multi_image_maximum": 4,
+                "video_strategy": "four_evenly_spaced_frames",
+                "textures": meshy_config.available,
+                "pbr": meshy_config.available,
+                "remesh": meshy_config.available,
+                "rigging": {
+                    "available": meshy_config.available,
+                    "scope": "textured_standard_humanoids_only",
+                },
+                "formats": ["glb", "stl"],
+                "metric_scale": False,
+                "manufacturing_cad": False,
+                "creates_step": False,
             },
         }
 
@@ -1181,6 +1319,15 @@ def create_app(
             bool,
             Form(description="Generate an optional non-metric concept GLB."),
         ] = False,
+        mesh_texture: Annotated[bool, Form(description="Texture the optional AI mesh.")] = True,
+        mesh_pbr: Annotated[bool, Form(description="Generate PBR maps for the AI mesh.")] = True,
+        mesh_topology: Annotated[Literal["triangle", "quad"], Form()] = "triangle",
+        mesh_target_faces: Annotated[int, Form(ge=100, le=300_000)] = 30_000,
+        mesh_rig: Annotated[
+            bool,
+            Form(description="Attempt Meshy rigging for a standard textured humanoid."),
+        ] = False,
+        mesh_height_m: Annotated[float, Form(gt=0, le=10)] = 1.7,
     ) -> JSONResponse:
         if len(file) != 1:
             for upload in file:
@@ -1207,6 +1354,14 @@ def create_app(
             concept_mesh_parameters = _concept_mesh_parameters(
                 concept_mesh,
                 concept_mesh_config,
+                meshy_config,
+                texture=mesh_texture,
+                pbr=mesh_pbr,
+                topology=mesh_topology,
+                target_faces=mesh_target_faces,
+                rig_humanoid=mesh_rig,
+                height_meters=mesh_height_m,
+                object_hint=object_hint,
             )
         except Exception:
             await upload.close()
@@ -1274,6 +1429,15 @@ def create_app(
             bool,
             Form(description="Generate an optional non-metric concept GLB."),
         ] = False,
+        mesh_texture: Annotated[bool, Form(description="Texture the optional AI mesh.")] = True,
+        mesh_pbr: Annotated[bool, Form(description="Generate PBR maps for the AI mesh.")] = True,
+        mesh_topology: Annotated[Literal["triangle", "quad"], Form()] = "triangle",
+        mesh_target_faces: Annotated[int, Form(ge=100, le=300_000)] = 30_000,
+        mesh_rig: Annotated[
+            bool,
+            Form(description="Attempt Meshy rigging for a standard textured humanoid."),
+        ] = False,
+        mesh_height_m: Annotated[float, Form(gt=0, le=10)] = 1.7,
     ) -> JSONResponse:
         if not MIN_PHOTOS <= len(files) <= MAX_PHOTOS:
             await _close_uploads(files)
@@ -1293,6 +1457,14 @@ def create_app(
             concept_mesh_parameters = _concept_mesh_parameters(
                 concept_mesh,
                 concept_mesh_config,
+                meshy_config,
+                texture=mesh_texture,
+                pbr=mesh_pbr,
+                topology=mesh_topology,
+                target_faces=mesh_target_faces,
+                rig_humanoid=mesh_rig,
+                height_meters=mesh_height_m,
+                object_hint=object_hint,
             )
         except Exception:
             await _close_uploads(files)
@@ -1367,6 +1539,15 @@ def create_app(
             bool,
             Form(description="Generate an optional non-metric concept GLB."),
         ] = False,
+        mesh_texture: Annotated[bool, Form(description="Texture the optional AI mesh.")] = True,
+        mesh_pbr: Annotated[bool, Form(description="Generate PBR maps for the AI mesh.")] = True,
+        mesh_topology: Annotated[Literal["triangle", "quad"], Form()] = "triangle",
+        mesh_target_faces: Annotated[int, Form(ge=100, le=300_000)] = 30_000,
+        mesh_rig: Annotated[
+            bool,
+            Form(description="Attempt Meshy rigging for a standard textured humanoid."),
+        ] = False,
+        mesh_height_m: Annotated[float, Form(gt=0, le=10)] = 1.7,
     ) -> JSONResponse:
         _validate_dimension(width_mm, field="width_mm")
         try:
@@ -1378,6 +1559,14 @@ def create_app(
             concept_mesh_parameters = _concept_mesh_parameters(
                 concept_mesh,
                 concept_mesh_config,
+                meshy_config,
+                texture=mesh_texture,
+                pbr=mesh_pbr,
+                topology=mesh_topology,
+                target_faces=mesh_target_faces,
+                rig_humanoid=mesh_rig,
+                height_meters=mesh_height_m,
+                object_hint=object_hint,
             )
         except Exception:
             await file.close()
@@ -1420,6 +1609,62 @@ def create_app(
             raise
         finally:
             await file.close()
+        return _accepted_job(manager.snapshot(job.job_id))
+
+    @application.post("/api/jobs/text", status_code=202)
+    async def create_text_job(
+        request: Request,
+        prompt: Annotated[
+            str,
+            Form(
+                min_length=1,
+                max_length=MAX_PROMPT_CHARS,
+                description="A description of the visual 3D asset to generate.",
+            ),
+        ],
+        mesh_texture: Annotated[bool, Form(description="Texture the generated mesh.")] = True,
+        mesh_pbr: Annotated[bool, Form(description="Generate PBR maps for the mesh.")] = True,
+        mesh_topology: Annotated[Literal["triangle", "quad"], Form()] = "triangle",
+        mesh_target_faces: Annotated[int, Form(ge=100, le=300_000)] = 30_000,
+        mesh_rig: Annotated[
+            bool,
+            Form(description="Attempt rigging for a standard textured humanoid only."),
+        ] = False,
+        mesh_height_m: Annotated[float, Form(gt=0, le=10)] = 1.7,
+    ) -> JSONResponse:
+        cleaned_prompt = " ".join(prompt.split())
+        if not cleaned_prompt:
+            raise ApiError(422, "invalid_prompt", "Enter a text description to generate a mesh.")
+        if not meshy_config.available:
+            raise ApiError(
+                409,
+                "generative_mesh_unavailable",
+                "Text-to-3D generation is not configured on this server.",
+            )
+        mesh_parameters = _meshy_parameters(
+            texture=mesh_texture,
+            pbr=mesh_pbr,
+            topology=mesh_topology,
+            target_faces=mesh_target_faces,
+            rig_humanoid=mesh_rig,
+            height_meters=mesh_height_m,
+        )
+        manager = _manager(request)
+        stage = manager.stage(upload_reservation=_upload_reservation(request))
+        try:
+            job = manager.submit(
+                stage,
+                kind="text",
+                input_paths=(),
+                parameters={
+                    "prompt": cleaned_prompt,
+                    "concept_mesh": True,
+                    **mesh_parameters,
+                },
+            )
+        except BaseException:
+            manager.discard(stage)
+            raise
         return _accepted_job(manager.snapshot(job.job_id))
 
     @application.get("/api/jobs/{job_id}")
@@ -1527,19 +1772,95 @@ def _intelligence_parameters(
 def _concept_mesh_parameters(
     requested: bool,
     config: ConceptMeshConfig,
+    meshy_config: MeshyConfig,
+    *,
+    texture: bool,
+    pbr: bool,
+    topology: Literal["triangle", "quad"],
+    target_faces: int,
+    rig_humanoid: bool,
+    height_meters: float,
+    object_hint: str,
 ) -> dict[str, Any]:
     if not requested:
         return {}
-    if not config.available:
+    if not meshy_config.available and not config.available:
         raise ApiError(
             409,
             "concept_mesh_unavailable",
             (
-                "The optional concept-mesh worker is not configured and licensed on this server. "
+                "An optional AI mesh provider is not configured on this server. "
                 "Validated STEP reconstruction remains available."
             ),
         )
-    return {"concept_mesh": True}
+    if not meshy_config.available:
+        if rig_humanoid:
+            raise ApiError(
+                409,
+                "mesh_rigging_unavailable",
+                "Humanoid rigging requires the configured Meshy provider.",
+            )
+        return {"concept_mesh": True}
+    parameters = {
+        "concept_mesh": True,
+        **_meshy_parameters(
+            texture=texture,
+            pbr=pbr,
+            topology=topology,
+            target_faces=target_faces,
+            rig_humanoid=rig_humanoid,
+            height_meters=(height_meters if rig_humanoid else None),
+        ),
+    }
+    hint = sanitize_query(object_hint)
+    if hint:
+        parameters["object_hint"] = hint
+    return parameters
+
+
+def _meshy_parameters(
+    *,
+    texture: bool,
+    pbr: bool,
+    topology: Literal["triangle", "quad"],
+    target_faces: int,
+    rig_humanoid: bool,
+    height_meters: float | None,
+) -> dict[str, Any]:
+    try:
+        options = MeshyOptions(
+            texture=texture,
+            pbr=(pbr if texture else False),
+            topology=topology,
+            target_faces=target_faces,
+            rig_humanoid=rig_humanoid,
+            height_meters=(height_meters if rig_humanoid else None),
+        )
+    except (TypeError, ValueError) as error:
+        raise ApiError(422, "invalid_mesh_options", str(error)) from None
+    return {
+        "mesh_texture": options.texture,
+        "mesh_pbr": options.pbr,
+        "mesh_topology": options.topology,
+        "mesh_target_faces": options.target_faces,
+        "mesh_rig": options.rig_humanoid,
+        "mesh_height_m": options.height_meters,
+    }
+
+
+def _meshy_options(parameters: Mapping[str, Any]) -> MeshyOptions:
+    return MeshyOptions(
+        texture=bool(parameters.get("mesh_texture", True)),
+        pbr=bool(parameters.get("mesh_pbr", True)),
+        topology=str(parameters.get("mesh_topology", "triangle")),
+        target_faces=int(parameters.get("mesh_target_faces", 30_000)),
+        rig_humanoid=bool(parameters.get("mesh_rig", False)),
+        height_meters=(
+            float(parameters.get("mesh_height_m", 1.7))
+            if bool(parameters.get("mesh_rig", False))
+            else None
+        ),
+    )
 
 
 def _validated_upload_suffix(

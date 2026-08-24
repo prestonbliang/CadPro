@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b0f14">
-  <meta name="description" content="Turn one photo, an ordered photo orbit, or a turntable video into validated CAD and 3D files.">
+  <meta name="description" content="Generate a visual 3D asset from text, or turn one photo, an ordered photo orbit, or a turntable video into validated CAD and 3D files.">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="CadPro — Any capture. Real CAD output.">
-  <meta property="og:description" content="Reconstruct from one photo, 20–50 ordered views, or a turntable video. Export validated STEP, STL, and GLB geometry.">
+  <meta property="og:title" content="CadPro — Text to 3D and capture to CAD.">
+  <meta property="og:description" content="Generate a visual 3D asset from text, or reconstruct measured CAD from one photo, 20–50 ordered views, or a turntable video.">
   <meta property="og:image" content="__CADPRO_ORIGIN__/static/og-capture-to-cad.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="CadPro — Any capture. Real CAD output.">
-  <meta name="twitter:description" content="One photo, a full photo orbit, or video in. Validated CAD and 3D files out.">
+  <meta name="twitter:title" content="CadPro — Text to 3D and capture to CAD.">
+  <meta name="twitter:description" content="Text to a non-metric visual asset, or measured captures to validated CAD and 3D files.">
   <meta name="twitter:image" content="__CADPRO_ORIGIN__/static/og-capture-to-cad.png">
   <title>CadPro — Reconstruction Studio</title>
   <link rel="stylesheet" href="/static/styles.css">
@@ -32,19 +32,19 @@
   <main class="page-shell">
     <section class="intro">
       <div>
-        <p class="eyebrow">RECONSTRUCTION STUDIO / 2.1</p>
-        <h1>Any clean capture.<br><em>Real CAD output.</em></h1>
+        <p class="eyebrow">RECONSTRUCTION STUDIO / 2.2</p>
+        <h1>Describe or capture.<br><em>Build in 3D.</em></h1>
       </div>
-      <p class="lede">Start with one photo, a measured 20–50-view orbit, or one steady turntable video. CadPro builds a validated solid, keeps AI guesses separate from measurements, and exports files for Onshape, Blender, Fusion, and SolidWorks.</p>
+      <p class="lede">Generate a textured visual asset from a text prompt, or start with one photo, a measured 20–50-view orbit, or a steady turntable video for validated CAD. Visual AI meshes stay clearly separate from measurement-driven STEP output.</p>
     </section>
 
     <section class="studio" aria-label="Reconstruction workspace">
       <aside class="step-rail" aria-label="Workflow progress">
         <ol>
-          <li class="active"><span>01</span><div><b>Capture</b><small>Photo, orbit, or video</small></div></li>
-          <li><span>02</span><div><b>Calibrate</b><small>Add one real measurement</small></div></li>
-          <li><span>03</span><div><b>Reconstruct</b><small>Geometry + optional research</small></div></li>
-          <li><span>04</span><div><b>Export</b><small>STEP + meshes + report</small></div></li>
+          <li class="active"><span>01</span><div><b id="rail-step-one-title">Capture</b><small id="rail-step-one-copy">Photo, orbit, or video</small></div></li>
+          <li><span>02</span><div><b id="rail-step-two-title">Calibrate</b><small id="rail-step-two-copy">Add one real measurement</small></div></li>
+          <li><span>03</span><div><b id="rail-step-three-title">Reconstruct</b><small id="rail-step-three-copy">Geometry + optional research</small></div></li>
+          <li><span>04</span><div><b id="rail-step-four-title">Export</b><small id="rail-step-four-copy">STEP + meshes + report</small></div></li>
         </ol>
         <div class="rail-note">
           <span class="note-index">A</span>
@@ -53,7 +53,12 @@
       </aside>
 
       <div class="workbench">
-        <div class="mode-switch three-modes" role="tablist" aria-label="Capture type">
+        <div class="mode-switch four-modes" role="tablist" aria-label="Creation input">
+          <button class="mode-button" id="mode-text" type="button" role="tab" aria-selected="false" aria-controls="capture-panel" tabindex="-1" data-mode="text">
+            <span class="mode-icon text-icon" aria-hidden="true"></span>
+            <span><b>Text prompt</b><small>AI visual 3D asset</small></span>
+            <i>GENERATE</i>
+          </button>
           <button class="mode-button active" id="mode-image" type="button" role="tab" aria-selected="true" aria-controls="capture-panel" tabindex="0" data-mode="image">
             <span class="mode-icon photo-icon" aria-hidden="true"></span>
             <span><b>One photo</b><small>Measured profile extrusion</small></span>
@@ -75,6 +80,12 @@
           <div class="card-heading">
             <div><span class="section-number">01</span><h2 id="upload-title">Add one object photo</h2></div>
             <span class="file-counter" id="file-counter">0 / 1 image</span>
+          </div>
+
+          <div class="text-prompt-panel" id="text-prompt-panel" hidden>
+            <label for="text-prompt"><span>Describe the object and its visual details</span><small id="text-prompt-help">Include shape, materials, colors, proportions, and important visible features. Text generation creates a non-metric visual mesh, not measured CAD.</small></label>
+            <textarea id="text-prompt" maxlength="600" rows="7" aria-describedby="text-prompt-help text-prompt-count" placeholder="Example: A compact orange cordless drill with a black rubber grip, brushed-steel chuck, realistic PBR materials, clean product-design proportions, centered in a neutral pose"></textarea>
+            <div class="prompt-meta"><span>Be specific about form and materials.</span><output id="text-prompt-count" for="text-prompt" aria-live="polite">0 / 600</output></div>
           </div>
 
           <label class="drop-zone" id="drop-zone" for="file-input">
@@ -130,7 +141,7 @@
             <label class="toggle-row" for="concept-mesh">
               <input id="concept-mesh" type="checkbox" disabled>
               <span class="toggle-control" aria-hidden="true"></span>
-              <span><b>High-detail AI concept mesh</b><small>Ask a separately configured image-to-3D worker for an extra GLB based on one representative view. This visual mesh is non-metric and never replaces the validated STEP model.</small></span>
+              <span><b id="concept-mesh-title">High-detail AI concept mesh</b><small id="concept-mesh-copy">Ask a separately configured image-to-3D worker for an extra GLB based on one representative view. This visual mesh is non-metric and never replaces the validated STEP model.</small></span>
             </label>
             <label class="research-field" for="object-hint">
               <span>Object or research hint <small>optional</small></span>
@@ -139,16 +150,55 @@
             <p class="ai-note" id="ai-note">Local reconstruction works without an AI key. AI findings are references, not verified dimensions or manufacturing instructions.</p>
           </fieldset>
 
+          <fieldset class="mesh-settings-panel" id="mesh-settings-panel" hidden>
+            <legend><span>AI VISUAL ASSET SETTINGS</span><b id="mesh-settings-provider">PROVIDER CONTROLLED</b></legend>
+            <div class="mesh-toggle-grid">
+              <label class="toggle-row" for="mesh-texture">
+                <input id="mesh-texture" type="checkbox" checked>
+                <span class="toggle-control" aria-hidden="true"></span>
+                <span><b>Generate textures</b><small>Ask the provider to synthesize surface color and material maps for the visual mesh.</small></span>
+              </label>
+              <label class="toggle-row" for="mesh-pbr">
+                <input id="mesh-pbr" type="checkbox" checked>
+                <span class="toggle-control" aria-hidden="true"></span>
+                <span><b>PBR materials</b><small>Request physically based material channels when texture generation is enabled.</small></span>
+              </label>
+            </div>
+            <div class="mesh-settings-grid">
+              <label class="field" for="mesh-topology">
+                <span>Topology</span>
+                <select id="mesh-topology">
+                  <option value="triangle">Triangle mesh</option>
+                  <option value="quad">Quad mesh</option>
+                </select>
+              </label>
+              <label class="field" for="mesh-target-faces">
+                <span>Target faces</span>
+                <div class="measure-input"><input id="mesh-target-faces" type="number" min="100" max="300000" step="100" value="30000" inputmode="numeric"><b>faces</b></div>
+              </label>
+            </div>
+            <label class="toggle-row mesh-rig-row" for="mesh-rig">
+              <input id="mesh-rig" type="checkbox">
+              <span class="toggle-control" aria-hidden="true"></span>
+              <span><b>Humanoid rig</b><small>Optionally request a humanoid skeleton for a suitable character. Rigging does not make the mesh measured or manufacturing-ready.</small></span>
+            </label>
+            <label class="field mesh-height-field" id="mesh-height-field" for="mesh-height-m">
+              <span>Character height</span>
+              <div class="measure-input"><input id="mesh-height-m" type="number" min="0.1" max="10" step="0.01" value="1.7" inputmode="decimal" disabled><b>m</b></div>
+            </label>
+            <p class="mesh-truth">These settings guide an external visual-generation model. Face count, topology, materials, and rig quality must be inspected in a 3D editor.</p>
+          </fieldset>
+
           <div class="quality-row" id="quality-row">
-            <div><span class="quality-dot waiting"></span><p><b>Capture</b><small id="capture-check">Add one clear image</small></p></div>
-            <div><span class="quality-dot waiting"></span><p><b>Scale</b><small id="scale-check">100 mm measured width</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b id="capture-check-title">Capture</b><small id="capture-check">Add one clear image</small></p></div>
+            <div><span class="quality-dot waiting"></span><p><b id="scale-check-title">Scale</b><small id="scale-check">100 mm measured width</small></p></div>
             <div><span class="quality-dot waiting"></span><p><b id="geometry-check-title">Depth</b><small id="geometry-check">10 mm extrusion</small></p></div>
           </div>
 
           <div class="action-row">
-            <p><span aria-hidden="true">●</span> Uploads are isolated per job and expire automatically.</p>
+            <p id="action-note"><span aria-hidden="true">●</span> Uploads are isolated per job and expire automatically.</p>
             <button class="build-button" id="build-button" type="button" disabled>
-              <span>BUILD CAD MODEL</span><i aria-hidden="true">→</i>
+              <span id="build-button-label">BUILD CAD MODEL</span><i aria-hidden="true">→</i>
             </button>
           </div>
           <div class="message" id="message" role="alert" hidden></div>
@@ -156,17 +206,17 @@
 
         <div class="progress-panel" id="progress-panel" hidden aria-live="polite">
           <div class="progress-orbit" aria-hidden="true"><span></span><i></i></div>
-          <p class="eyebrow">GEOMETRY BUILD / LIVE</p>
+          <p class="eyebrow" id="progress-eyebrow">GEOMETRY BUILD / LIVE</p>
           <h2 id="progress-title">Preparing your capture</h2>
           <p id="progress-copy">Checking every input before reconstruction begins.</p>
           <div class="progress-track"><span id="progress-bar"></span></div>
           <div class="progress-meta"><span id="progress-stage">UPLOAD</span><b id="progress-value">5%</b></div>
           <ol class="build-stages">
-            <li class="active" data-stage="upload"><span>01</span>Secure capture</li>
-            <li data-stage="research"><span>02</span>Analyze + research</li>
-            <li data-stage="segment"><span>03</span>Extract silhouettes</li>
-            <li data-stage="reconstruct"><span>04</span>Build solid</li>
-            <li data-stage="export"><span>05</span>Validate + export</li>
+            <li class="active" data-stage="upload"><span>01</span><b>Secure capture</b></li>
+            <li data-stage="research"><span>02</span><b>Analyze + research</b></li>
+            <li data-stage="segment"><span>03</span><b>Extract silhouettes</b></li>
+            <li data-stage="reconstruct"><span>04</span><b>Build solid</b></li>
+            <li data-stage="export"><span>05</span><b>Validate + export</b></li>
           </ol>
         </div>
       </div>
@@ -174,17 +224,17 @@
 
     <section class="result-section" id="result-section" hidden aria-labelledby="result-title">
       <div class="result-heading">
-        <div><p class="eyebrow">RECONSTRUCTION COMPLETE / 04</p><h2 id="result-title">Your model is ready.</h2></div>
+        <div><p class="eyebrow" id="result-eyebrow">RECONSTRUCTION COMPLETE / 04</p><h2 id="result-title">Your model is ready.</h2></div>
         <button class="secondary-button" id="new-model" type="button">START ANOTHER MODEL</button>
       </div>
       <div class="result-grid">
         <div class="model-stage">
           <iframe id="model-preview" title="Interactive reconstructed model preview"></iframe>
-          <div class="model-stage-label"><span></span>VALIDATED SOLID · DRAG TO ORBIT</div>
+          <div class="model-stage-label" id="model-stage-label"><span></span>VALIDATED SOLID · DRAG TO ORBIT</div>
         </div>
         <aside class="result-panel">
-          <div class="result-badge"><span>✓</span><p><b>CAD integrity passed</b><small>STEP round-trip verified as one closed solid</small></p></div>
-          <div class="metric-grid">
+          <div class="result-badge" id="result-badge"><span>✓</span><p><b>CAD integrity passed</b><small>STEP round-trip verified as one closed solid</small></p></div>
+          <div class="metric-grid" id="metric-grid">
             <div><span>SIZE X</span><b id="metric-x">—</b><small>mm</small></div>
             <div><span>SIZE Y</span><b id="metric-y">—</b><small>mm</small></div>
             <div><span>SIZE Z</span><b id="metric-z">—</b><small>mm</small></div>
@@ -212,6 +262,9 @@
             <a class="download" id="download-stl" href="#"><span><b>STL</b><small>Blender · slicers · mesh tools</small></span><i>DOWNLOAD →</i></a>
             <a class="download" id="download-glb" href="#"><span><b>GLB</b><small>Blender · web · real-time 3D</small></span><i>DOWNLOAD →</i></a>
             <a class="download concept-download" id="download-concept" href="#" hidden><span><b>AI CONCEPT GLB</b><small>High-detail visual mesh · non-metric · not manufacturing CAD</small></span><i>DOWNLOAD →</i></a>
+            <a class="download primary generated-download" id="download-generated" href="#" hidden><span><b>AI VISUAL ASSET GLB</b><small>Textured visual mesh · non-metric · inspect before use</small></span><i>DOWNLOAD →</i></a>
+            <a class="download generated-download" id="download-generated-stl" href="#" hidden><span><b>AI VISUAL MESH STL</b><small>Unscaled mesh geometry · not validated for printing</small></span><i>DOWNLOAD →</i></a>
+            <a class="download generated-download" id="download-rigged" href="#" hidden><span><b>RIGGED AI ASSET GLB</b><small>Visual animation asset · inspect skeleton and weights</small></span><i>DOWNLOAD →</i></a>
             <a class="report-link" id="download-report" href="#">Download reconstruction + research report (.json)</a>
           </div>
           <div class="truth-note" id="truth-note"><span>!</span><p><b>Measured profile extrusion</b>The outline comes from your image; depth comes from the value you choose. A single image cannot reveal backside or hidden features.</p></div>

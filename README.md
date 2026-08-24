@@ -1,36 +1,49 @@
 # CadPro
 
-CadPro turns a measured object capture into interoperable CAD and 3D files through a
-local web application. The website accepts exactly one of these capture types:
+CadPro turns object captures into interoperable CAD and 3D files through a local web
+application. Version 2.2 keeps two deliberately separate output lanes:
+
+- **Measured STEP reconstruction** uses a real measurement and local geometry processing to
+  create the validated CAD exports described below.
+- **AI visual mesh generation** optionally sends a prompt or representative images to Meshy
+  and returns visual GLB/STL assets. These meshes are non-metric and are never STEP.
+
+The measured reconstruction lane accepts exactly one of these capture types:
 
 - one object photo;
 - 20–50 ordered photos covering one complete revolution; or
 - one turntable video, sampled into 20–50 evenly spaced views.
 
-Every successful job exports a validated **STEP** solid, binary **STL**, **GLB**, an
-interactive offline HTML preview, and a JSON reconstruction report. STEP is intended for
-Onshape, Fusion, SolidWorks, FreeCAD, and similar CAD systems. STL and GLB are included for
-Blender, slicers, web viewers, and mesh workflows.
+Every successful measured reconstruction exports a validated **STEP** solid, binary **STL**,
+**GLB**, an interactive offline HTML preview, and a JSON reconstruction report. STEP is
+intended for Onshape, Fusion, SolidWorks, FreeCAD, and similar CAD systems. STL and GLB are
+included for Blender, slicers, web viewers, and mesh workflows. The optional Meshy lane
+instead exports an AI-generated GLB, STL, preview, and provider report; it does not create or
+modify a STEP solid.
 
 CadPro is measurement-driven reconstruction, not a magic recovery of hidden design intent.
 Read [Technical truth and limitations](#technical-truth-and-limitations) before using an
 output for engineering or manufacturing.
 
-## Version 2.1 capability contract
+## Version 2.2 capability contract
 
 | Website mode | Required input | Measurement | Geometry produced |
 | --- | --- | --- | --- |
 | One photo | Exactly one square-on object image | Real profile width; chosen depth or trained neural depth estimate | Measurement-scaled 2.5D silhouette/profile extrusion |
 | Photo orbit | 20–50 ordered, evenly spaced photos | Real maximum width | Measurement-scaled silhouette visual hull |
 | Turntable video | Exactly one steady full-revolution video; choose 20–50 sampled views | Real maximum width | Measurement-scaled silhouette visual hull |
+| Optional Meshy visual mesh | Text, one image, or at most four provider-selected representative views | None; output is non-metric | Generative polygon GLB/STL only; never STEP |
 
-The three modes share the same guarded job queue, isolated transient storage, progress UI,
-OpenCascade export pipeline, and artifact verification. A completed STEP file is reloaded and
-rejected unless it contains exactly one valid, connected, positive-volume solid. STL and GLB
-are validated as non-empty geometry before the result is published.
+The three measured modes share the same guarded job queue, isolated transient storage, progress
+UI, OpenCascade export pipeline, and artifact verification. A completed STEP file is reloaded
+and rejected unless it contains exactly one valid, connected, positive-volume solid. STL and
+GLB are validated as non-empty geometry before the result is published. Meshy jobs use a
+separate external-provider path and never enter that STEP export pipeline.
 
-Version 2.1 includes:
+Version 2.2 includes:
 
+- an optional, server-side Meshy provider for text, one-image, and representative multi-view
+  AI visual-mesh generation, kept separate from measured STEP reconstruction;
 - a trainable local neural network that predicts bounded depth-to-width ratios from images;
 - JSONL datasets using labeled dimensions or aligned image/STEP training pairs;
 - safe data-only NPZ checkpoints, Adam training, CLI inference, and website inference;
@@ -114,7 +127,7 @@ limits. Measurements must be finite and greater than zero.
 
 ## Trainable neural image-to-STEP prediction
 
-CadPro 2.1 includes a real train/predict pipeline in `src/cadpro/neural.py`. It converts each
+CadPro 2.2 includes the real train/predict pipeline in `src/cadpro/neural.py`. It converts each
 image into a normalized 24 x 24 silhouette raster plus aspect, foreground, hole, and symmetry
 features. A two-hidden-layer neural network learns the logarithmic depth-to-width ratio. At
 inference time, the user still supplies one real width measurement; the model predicts depth,
@@ -212,7 +225,125 @@ Enabling this feature sends representative images and the optional object hint t
 provider. Review your provider's privacy, retention, regional-processing, and billing terms
 before enabling it for confidential objects.
 
-## Optional Hunyuan-compatible concept mesh worker
+## Optional Meshy AI visual-mesh provider
+
+Version 2.2 can use Meshy's hosted API to generate a detailed visual mesh from text or object
+images. This provider is off by default and runs on the server so its credential is never placed
+in browser JavaScript. It is an independent **AI visual mesh** lane: Meshy output never changes,
+replaces, or supplies geometry to CadPro's measurement-driven STEP lane.
+
+Create and fund a Meshy API account, create an API key in Meshy's settings, and then configure
+the CadPro server:
+
+```powershell
+$env:CADPRO_MESHY_ENABLED = "1"
+$env:MESHY_API_KEY = "msy_your-api-key"
+.venv\Scripts\cadpro.exe web
+```
+
+On macOS/Linux, set the same variables with `export` and start the existing `cadpro web`
+command. CadPro does not bundle a Meshy account, credits, model weights, or an API license.
+Leaving either the feature flag or credential unavailable keeps the provider disabled without
+disabling local measured reconstruction.
+
+### Meshy inputs and provider settings
+
+The website can submit these visual-generation inputs:
+
+- **Text:** a description is sent through Meshy's Text-to-3D workflow.
+- **One image:** one bounded object image is sent to Meshy's Image-to-3D workflow.
+- **Multiple photos or video:** CadPro selects at most four representative, well-separated views
+  from the ordered capture or locally sampled video frames. Meshy's Multi-Image-to-3D API accepts
+  only one to four images, so it does not receive the entire 20–50-view reconstruction set or a
+  raw video.
+
+The primary/front view should show the object clearly, and every submitted view should depict
+the same object with consistent lighting and little occlusion. More supplied photos do not make
+Meshy's four-image limit larger; the full measured capture still belongs to CadPro's local
+silhouette reconstruction lane.
+
+The optional provider settings affect only the AI mesh:
+
+- **Textured** asks Meshy to synthesize texture rather than return geometry alone.
+- **PBR** additionally requests metallic, roughness, and normal material maps and therefore only
+  applies when texturing is enabled.
+- **Remesh topology and target faces** choose triangle or quad-dominant output and an approximate
+  polygon target. Meshy may deviate from the requested face count. Remeshing does not recover
+  analytic planes, cylinders, holes, sketches, dimensions, constraints, or CAD feature history.
+- **Rigging** is optional post-processing for a suitable textured humanoid GLB. Meshy's current
+  API documentation limits reliable programmatic rigging to standard biped humanoids with clear
+  limbs and body structure; it is not a general rigging mode for mechanical parts, animals, or
+  arbitrary objects. The character-height field guides rig scaling only and is not a measured
+  dimension for CAD.
+
+Meshy jobs run asynchronously. CadPro tracks the provider task and downloads completed assets
+while their signed URLs are available. A successful visual-mesh job publishes an AI-generated
+**GLB**, **STL**, interactive preview, and JSON provider report. Use GLB for materials and a
+Blender/web workflow; STL contains geometry only. A successful optional humanoid-rigging stage
+adds a separate rigged GLB. Inspect the report for the selected input mode, provider settings,
+provenance, and warnings.
+
+### Mesh is not STEP
+
+Meshy generates triangles or quad-dominant polygon meshes. It does not return STEP, B-rep faces,
+parametric features, design history, tolerances, or verified real-world dimensions. CadPro does
+not wrap, rename, or advertise a Meshy mesh as STEP. Even when the object looks convincing or a
+provider estimates scale, the result remains a **non-metric visual asset** and may hallucinate
+the hidden side, close real holes, add details, or omit functional geometry.
+
+Use the separate measured lane when a STEP file is required: provide a real width and the depth
+or a full ordered capture, let the local OpenCascade pipeline build and validate the solid, and
+then verify it in CAD. Use the Meshy lane for concept visualization, Blender work, game assets,
+or a manual remodeling reference. Never use its apparent dimensions for manufacturing.
+
+### Billing, data, retention, and rights
+
+Enabling Meshy sends the selected prompt or representative images to an external provider.
+Before enabling it for user, client, proprietary, or export-controlled objects, review the live
+provider agreement and obtain any contract your use requires:
+
+- Meshy's [authentication guide](https://docs.meshy.ai/en/api/authentication) explains API-key
+  creation and storage. The key must remain a server secret; Meshy's
+  [error reference](https://docs.meshy.ai/en/api/errors) says direct browser CORS calls are not
+  permitted.
+- API generation uses paid credits. Review Meshy's current
+  [API pricing](https://docs.meshy.ai/en/api/pricing) and
+  [rate limits](https://docs.meshy.ai/en/api/rate-limits); costs and model availability can
+  change.
+- Meshy's [Terms of Service](https://www.meshy.ai/terms-of-use) currently state that
+  non-Enterprise API output is deleted from Meshy's service three days after generation. Keep
+  required CadPro downloads and reports under your own retention policy.
+- Those Terms also currently permit training on non-Enterprise customer inputs and outputs
+  unless otherwise agreed. Do not promise confidential or no-training handling based only on
+  enabling this integration; obtain an appropriate written plan or agreement when required.
+- You must own or have permission to upload every image and to use the resulting asset. Review
+  the plan-specific output license and any attribution, privacy, regional-processing, and
+  commercial-use obligations before distribution.
+
+The relevant provider workflows are documented by Meshy at
+[Text to 3D](https://docs.meshy.ai/en/api/text-to-3d),
+[Image to 3D](https://docs.meshy.ai/en/api/image-to-3d),
+[Multi-Image to 3D](https://docs.meshy.ai/en/api/multi-image-to-3d), and
+[Rigging](https://docs.meshy.ai/en/api/rigging). Provider documentation and terms can change;
+review them again before each production deployment.
+
+### Test the Meshy lane
+
+1. Set `CADPRO_MESHY_ENABLED=1` and `MESHY_API_KEY`, restart the web server, and open the local
+   website.
+2. Confirm the optional Meshy controls are available. Start with a non-confidential test prompt
+   or one clear image and geometry-only settings to avoid unnecessary texture/rigging credits.
+3. Wait for the asynchronous job to finish, then download and open the GLB in Blender or another
+   glTF viewer and inspect the STL in a mesh viewer or slicer.
+4. Open the provider report and confirm its input mode, view count when applicable, requested
+   settings, warnings, and visual-mesh/non-metric classification. Confirm that the Meshy result
+   contains no STEP artifact.
+5. Run a normal measured capture separately, download its STEP, and verify that its dimensions
+   and reconstruction report come from the measured local lane rather than the Meshy job.
+6. Restart without the Meshy feature flag to confirm the external controls become unavailable
+   while one-photo, photo-orbit, and turntable-video STEP reconstruction remain usable.
+
+## Legacy optional Hunyuan-compatible concept mesh worker
 
 `src/cadpro/ml_mesh.py` contains an opt-in integration seam for an administrator-operated,
 Hunyuan-compatible image-to-3D worker. When the worker is available, a website user can request
@@ -306,8 +437,10 @@ external corpus format.
 
 ## Technical truth and limitations
 
-CadPro outputs one valid boundary-representation solid, but that does not mean the solid is an
-exact copy of the original object or a native parametric feature-history model.
+CadPro's measured reconstruction lane outputs one valid boundary-representation solid, but that
+does not mean the solid is an exact copy of the original object or a native parametric
+feature-history model. The optional Meshy and legacy Hunyuan lanes output polygon concept
+meshes, not boundary-representation solids.
 
 One-photo mode cannot determine:
 
@@ -349,14 +482,17 @@ measurement and qualified engineering review.
 ```
 
 The end-to-end suite builds actual one-photo, 20-photo, and turntable-video reconstructions,
-downloads every artifact, and reloads the generated STEP solids.
+downloads every measured artifact, and reloads the generated STEP solids. External-provider
+tests must use mocked provider responses; the normal test suite should not spend Meshy credits
+or upload test fixtures to a third party.
 
 ```text
-src/cadpro/web.py          three-mode API, job queue, request guards, artifact security
+src/cadpro/web.py          measured/text APIs, job queue, request guards, artifact security
 src/cadpro/web_assets/     responsive capture, calibration, progress, and result interface
 src/cadpro/reconstruct.py  profile extrusion and ordered silhouette visual-hull reconstruction
 src/cadpro/neural.py       trainable depth model, safe checkpoints, image features, STEP inference
 src/cadpro/enrichment.py   optional OpenAI vision and cited web-reference report enrichment
+src/cadpro/meshy.py        optional hosted Meshy tasks and validated visual-mesh exports
 src/cadpro/ml_mesh.py      optional external concept-mesh worker client and GLB validation
 src/cadpro/artifacts.py    STEP/STL/GLB/preview/report export and verification
 src/cadpro/media.py        decoding, frame sampling, segmentation, and contour extraction

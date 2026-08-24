@@ -140,7 +140,12 @@ def test_index_health_and_routes_advertise_all_capture_modes(tmp_path, monkeypat
         for route in app.routes
         if "POST" in (getattr(route, "methods", None) or set())
     }
-    assert post_routes == {"/api/jobs/image", "/api/jobs/photos", "/api/jobs/video"}
+    assert post_routes == {
+        "/api/jobs/image",
+        "/api/jobs/photos",
+        "/api/jobs/video",
+        "/api/jobs/text",
+    }
     openapi = app.openapi()
     for path, field, minimum, maximum in (
         ("/api/jobs/image", "file", 1, 1),
@@ -820,6 +825,10 @@ def test_optional_intelligence_is_explicit_configured_and_bounded(tmp_path, monk
         "metric_scale": False,
         "manufacturing_cad": False,
         "replaces_step": False,
+        "multi_view_maximum": 1,
+        "textured": False,
+        "pbr": False,
+        "rigging": False,
     }
     assert "127.0.0.1:8099" not in health.text
     assert completed["parameters"] == {

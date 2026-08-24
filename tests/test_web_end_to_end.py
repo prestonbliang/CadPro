@@ -80,7 +80,10 @@ def _wait_for_terminal(client: TestClient, status_url: str) -> dict:
     raise AssertionError(f"reconstruction job did not finish: {snapshot}")
 
 
-def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_path, monkeypatch):
+def test_frontend_supports_text_and_three_capture_modes_with_v22_metadata(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv("CADPRO_PUBLIC_ORIGIN", "https://cadpro.example")
     monkeypatch.delenv("CADPRO_AI_ENRICHMENT", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -96,7 +99,7 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
 
     assert response.status_code == 200
     assert health.status_code == 200
-    assert health.json()["version"] == "2.1.0"
+    assert health.json()["version"] == "2.2.0"
     assert health.json()["capture_limits"]["images"] == {"minimum": 1, "maximum": 1}
     assert health.json()["capture_limits"]["photos"] == {"minimum": 20, "maximum": 50}
     assert health.json()["capture_limits"]["video_views"] == {
@@ -123,8 +126,12 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
         "trained_examples": None,
         "validation_examples": None,
     }
+    assert health.json()["generative_mesh"]["available"] is False
+    assert health.json()["generative_mesh"]["text_to_3d"] is False
+    assert health.json()["generative_mesh"]["creates_step"] is False
     assert "https://cadpro.example/static/og-capture-to-cad.png" in response.text
     assert "__CADPRO_ORIGIN__" not in response.text
+    assert 'data-mode="text"' in response.text
     assert 'data-mode="image"' in response.text
     assert 'data-mode="photos"' in response.text
     assert 'data-mode="video"' in response.text
@@ -135,6 +142,9 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
     assert len(collector.ids) == len(set(collector.ids))
     assert {
         "file-input",
+        "text-prompt",
+        "mesh-settings-panel",
+        "mesh-target-faces",
         "width-mm",
         "depth-mm",
         "view-count",
@@ -170,6 +180,8 @@ def test_frontend_enforces_bounded_inputs_and_sequential_photo_preview_memory():
     assert "THUMBNAIL_MAX_EDGE = 240" in script
     assert "MAX_IMAGE_EDGE = 8_192" in script
     assert "MAX_IMAGE_PIXELS = 12_500_000" in script
+    assert "MAX_PROMPT_CHARS = 600" in script
+    assert "MAX_MESH_FACES = 300_000" in script
     assert 'mode === "image" && incoming.length !== 1' in script
     assert "photos && incoming.length > 50" in script
     assert "photos ? count >= 20 && count <= 50" in script
@@ -189,11 +201,19 @@ def test_frontend_enforces_bounded_inputs_and_sequential_photo_preview_memory():
     assert 'form.append("files", file, file.name)' in script
     assert 'form.append("file", state.files[0], state.files[0].name)' in script
     assert 'fetch(`/api/jobs/${state.mode}`' in script
+    assert 'form.append("prompt", prompt)' in script
+    assert 'form.append("mesh_target_faces", $("#mesh-target-faces").value)' in script
+    assert 'payload.kind === "text"' in script
+    assert 'data-mode="text"' in document
     assert 'data-mode="photos"' in document
     assert 'data-mode="video"' in document
     assert 'id="depth-mm"' in document
     assert 'id="view-count" type="range" min="20" max="50"' in document
     assert 'id="neural-predict" type="checkbox" disabled' in document
+    assert 'id="text-prompt" maxlength="600"' in document
+    assert 'id="mesh-target-faces" type="number" min="100" max="300000"' in document
+    assert 'id="download-generated"' in document
+    assert 'id="download-rigged"' in document
     assert 'form.append("neural_predict", String(neuralRequested))' in script
     assert "result.neural_prediction" in script
     assert 'aria-controls="capture-panel"' in document
