@@ -32,7 +32,7 @@
   <main class="page-shell">
     <section class="intro">
       <div>
-        <p class="eyebrow">RECONSTRUCTION STUDIO / 02</p>
+        <p class="eyebrow">RECONSTRUCTION STUDIO / 2.1</p>
         <h1>Any clean capture.<br><em>Real CAD output.</em></h1>
       </div>
       <p class="lede">Start with one photo, a measured 20–50-view orbit, or one steady turntable video. CadPro builds a validated solid, keeps AI guesses separate from measurements, and exports files for Onshape, Blender, Fusion, and SolidWorks.</p>
@@ -99,7 +99,7 @@
               <div class="measure-input"><input id="width-mm" type="number" min="0.001" max="1000000" step="0.1" value="100" inputmode="decimal"><b>mm</b></div>
             </label>
             <label class="field image-setting" id="depth-field">
-              <span>Extrusion depth <button class="tip" type="button" title="For one photo, choose how far the visible profile extends backward.">?</button></span>
+              <span id="depth-label">Extrusion depth <button class="tip" type="button" title="For one photo, choose how far the visible profile extends backward.">?</button></span>
               <div class="measure-input"><input id="depth-mm" type="number" min="0.001" max="1000000" step="0.1" value="10" inputmode="decimal"><b>mm</b></div>
             </label>
             <label class="field orbit-setting" hidden>
@@ -117,6 +117,11 @@
 
           <fieldset class="intelligence-panel" id="intelligence-panel">
             <legend><span>OPTIONAL INTELLIGENCE LAYER</span><b id="ai-availability">CHECKING</b></legend>
+            <label class="toggle-row neural-setting" for="neural-predict">
+              <input id="neural-predict" type="checkbox" disabled>
+              <span class="toggle-control" aria-hidden="true"></span>
+              <span><b>Predict hidden depth with a trained neural network</b><small>Use a local CadPro checkpoint trained from labeled image/STEP pairs. The measured width still controls scale; predicted depth is an estimate that changes the STEP extrusion.</small></span>
+            </label>
             <label class="toggle-row" for="ai-enhance">
               <input id="ai-enhance" type="checkbox" disabled>
               <span class="toggle-control" aria-hidden="true"></span>
@@ -192,6 +197,11 @@
             <h3 id="research-object">Object research complete</h3>
             <p id="research-summary"></p>
             <a id="research-report-link" href="#">Review findings and cited sources in the JSON report →</a>
+          </div>
+          <div class="prediction-result" id="prediction-result" hidden>
+            <span>TRAINED NEURAL DEPTH</span>
+            <h3 id="prediction-depth">Predicted extrusion depth</h3>
+            <p id="prediction-summary"></p>
           </div>
           <div class="optional-warning" id="optional-warning" role="status" hidden>
             <span>OPTIONAL LAYER NOTICE</span>

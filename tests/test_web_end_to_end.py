@@ -84,6 +84,8 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
     monkeypatch.setenv("CADPRO_PUBLIC_ORIGIN", "https://cadpro.example")
     monkeypatch.delenv("CADPRO_AI_ENRICHMENT", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CADPRO_NEURAL_ENABLED", raising=False)
+    monkeypatch.delenv("CADPRO_NEURAL_CHECKPOINT", raising=False)
     app = create_app(storage_parent=tmp_path)
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
@@ -94,7 +96,7 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
 
     assert response.status_code == 200
     assert health.status_code == 200
-    assert health.json()["version"] == "2.0.0"
+    assert health.json()["version"] == "2.1.0"
     assert health.json()["capture_limits"]["images"] == {"minimum": 1, "maximum": 1}
     assert health.json()["capture_limits"]["photos"] == {"minimum": 20, "maximum": 50}
     assert health.json()["capture_limits"]["video_views"] == {
@@ -109,6 +111,17 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
         "vision": False,
         "web_search": False,
         "geometry_mutation": False,
+    }
+    assert health.json()["neural_prediction"] == {
+        "available": False,
+        "enabled": False,
+        "checkpoint_valid": False,
+        "model_type": "numpy_mlp_depth_regressor",
+        "predicts": "depth_to_width_ratio",
+        "changes_geometry": True,
+        "requires_measured_width": True,
+        "trained_examples": None,
+        "validation_examples": None,
     }
     assert "https://cadpro.example/static/og-capture-to-cad.png" in response.text
     assert "__CADPRO_ORIGIN__" not in response.text
@@ -126,6 +139,7 @@ def test_frontend_supports_three_capture_modes_and_has_v2_social_metadata(tmp_pa
         "depth-mm",
         "view-count",
         "ai-enhance",
+        "neural-predict",
         "build-button",
         "result-section",
     } <= set(collector.ids)
@@ -179,6 +193,9 @@ def test_frontend_enforces_bounded_inputs_and_sequential_photo_preview_memory():
     assert 'data-mode="video"' in document
     assert 'id="depth-mm"' in document
     assert 'id="view-count" type="range" min="20" max="50"' in document
+    assert 'id="neural-predict" type="checkbox" disabled' in document
+    assert 'form.append("neural_predict", String(neuralRequested))' in script
+    assert "result.neural_prediction" in script
     assert 'aria-controls="capture-panel"' in document
     assert 'id="capture-panel" role="tabpanel"' in document
     assert 'id="optional-warning" role="status"' in document

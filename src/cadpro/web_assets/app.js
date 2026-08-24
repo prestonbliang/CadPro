@@ -7,6 +7,7 @@ const state = {
   selectionGeneration: 0,
   selectionController: null,
   aiAvailable: false,
+  neuralAvailable: false,
   conceptMeshAvailable: false,
   jobId: null,
   pollTimer: null,
@@ -82,9 +83,24 @@ function setMode(mode) {
     : "image/png,image/jpeg,image/webp,image/bmp";
   fileInput.multiple = mode === "photos";
   $$(".image-setting").forEach((field) => { field.hidden = mode !== "image"; });
+  $$(".neural-setting").forEach((field) => { field.hidden = mode !== "image"; });
+  if (mode !== "image") $("#neural-predict").checked = false;
   $$(".orbit-setting").forEach((field) => { field.hidden = mode === "image"; });
   $$(".video-setting").forEach((field) => { field.hidden = !video; });
+  syncNeuralControls();
   renderSelection();
+}
+
+function neuralPredictionSelected() {
+  return state.mode === "image" && state.neuralAvailable && $("#neural-predict").checked;
+}
+
+function syncNeuralControls() {
+  const predicted = neuralPredictionSelected();
+  $("#depth-mm").disabled = predicted;
+  $("#depth-label").childNodes[0].textContent = predicted
+    ? "Extrusion depth · neural prediction "
+    : "Extrusion depth ";
 }
 
 function resetFiles() {
@@ -290,7 +306,8 @@ function renderSelection() {
   const captureValid = countValid && state.dimensionsValid === true;
   const width = dimensionValue("#width-mm");
   const depth = dimensionValue("#depth-mm");
-  const geometryValid = mode === "image" ? depth !== null : true;
+  const neural = neuralPredictionSelected();
+  const geometryValid = mode === "image" ? neural || depth !== null : true;
   const totalBytes = state.files.reduce((sum, file) => sum + file.size, 0);
 
   $("#file-counter").textContent = mode === "image"
@@ -316,7 +333,9 @@ function renderSelection() {
   $("#scale-check").textContent = width ? `${formatNumber(width)} mm measured width` : "Enter a valid measured width";
   $("#geometry-check-title").textContent = mode === "image" ? "Depth" : video ? "Sampling" : "Coverage";
   $("#geometry-check").textContent = mode === "image"
-    ? (depth ? `${formatNumber(depth)} mm extrusion` : "Enter a valid extrusion depth")
+    ? neural
+      ? "Trained model will predict extrusion depth"
+      : (depth ? `${formatNumber(depth)} mm extrusion` : "Enter a valid extrusion depth")
     : video ? `${$("#view-count").value} evenly sampled views` : "One complete ordered revolution";
 
   const dots = $$(".quality-dot");
@@ -388,7 +407,9 @@ async function startBuild() {
   }
   form.append("width_mm", $("#width-mm").value);
   if (state.mode === "image") {
-    form.append("depth_mm", $("#depth-mm").value);
+    const neuralRequested = neuralPredictionSelected();
+    form.append("neural_predict", String(neuralRequested));
+    if (!neuralRequested) form.append("depth_mm", $("#depth-mm").value);
   } else {
     form.append("clockwise", String($("#rotation-direction").value === "clockwise"));
   }
@@ -507,6 +528,13 @@ async function renderResult(payload) {
     $("#research-object").textContent = identity.common_name || identity.name || identity.label || research.object_name || "Object research complete";
     $("#research-summary").textContent = research.summary || identity.summary || identity.evidence || "Review the cited candidate specifications and uncertainty notes before using any reference dimension.";
   }
+  const prediction = result.neural_prediction;
+  const hasPrediction = prediction?.status === "completed";
+  $("#prediction-result").hidden = !hasPrediction;
+  if (hasPrediction) {
+    $("#prediction-depth").textContent = `${formatNumber(prediction.predicted_depth_mm)} mm predicted depth`;
+    $("#prediction-summary").textContent = `Learned ratio ${formatNumber(prediction.predicted_depth_ratio, 4)} × measured width · heuristic confidence ${formatNumber(Number(prediction.confidence_score) * 100, 0)}%. Verify this estimate against the physical object.`;
+  }
   const optionalFailures = [];
   if (research?.status === "failed") {
     optionalFailures.push("AI/web research did not finish; the local measurement-driven CAD exports still completed.");
@@ -518,7 +546,9 @@ async function renderResult(payload) {
   $("#optional-warning-copy").textContent = optionalFailures.join(" ");
   const truth = $("#truth-note");
   if (payload.kind === "image") {
-    truth.innerHTML = "<span>!</span><p><b>Measured profile extrusion</b>The outline comes from one image; depth comes from your chosen value. AI research cannot reveal or verify hidden geometry.</p>";
+    truth.innerHTML = hasPrediction
+      ? "<span>!</span><p><b>Neural profile extrusion</b>The outline and width are measured inputs; depth is a learned estimate. Hidden topology is not recovered and every critical feature still needs verification.</p>"
+      : "<span>!</span><p><b>Measured profile extrusion</b>The outline comes from one image; depth comes from your chosen value. AI research cannot reveal or verify hidden geometry.</p>";
   } else {
     truth.innerHTML = "<span>!</span><p><b>Measured visual hull</b>The solid comes from intersected silhouettes. Hidden cavities and concavities that never change an outline still require CAD verification.</p>";
   }
@@ -569,6 +599,7 @@ function startAnotherModel() {
   renderSelection();
   $("#result-section").hidden = true;
   $("#research-result").hidden = true;
+  $("#prediction-result").hidden = true;
   $("#optional-warning").hidden = true;
   $("#optional-warning-copy").textContent = "";
   $("#download-concept").hidden = true;
@@ -591,15 +622,24 @@ async function loadCapabilities() {
     const intelligence = health.intelligence || health.ai || {};
     state.aiAvailable = intelligence.available === true;
     $("#ai-enhance").disabled = !state.aiAvailable;
+    const neural = health.neural_prediction || {};
+    state.neuralAvailable = neural.available === true;
+    $("#neural-predict").disabled = !state.neuralAvailable;
     const conceptMesh = health.concept_mesh || {};
     state.conceptMeshAvailable = conceptMesh.available === true;
     $("#concept-mesh").disabled = !state.conceptMeshAvailable;
-    const optionalAvailable = state.aiAvailable || state.conceptMeshAvailable;
-    $("#ai-availability").textContent = state.aiAvailable && state.conceptMeshAvailable
-      ? "RESEARCH + MESH READY"
-      : state.aiAvailable ? "RESEARCH READY" : state.conceptMeshAvailable ? "MESH READY" : "LOCAL MODE";
+    const optionalAvailable = state.aiAvailable || state.neuralAvailable || state.conceptMeshAvailable;
+    const ready = [
+      state.neuralAvailable ? "NEURAL" : "",
+      state.aiAvailable ? "RESEARCH" : "",
+      state.conceptMeshAvailable ? "MESH" : "",
+    ].filter(Boolean);
+    $("#ai-availability").textContent = ready.length ? `${ready.join(" + ")} READY` : "LOCAL MODE";
     $("#ai-availability").classList.toggle("available", optionalAvailable);
     const notes = [];
+    notes.push(state.neuralAvailable
+      ? "A trained local depth checkpoint is ready."
+      : "Train a depth model, then set CADPRO_NEURAL_ENABLED=1 and CADPRO_NEURAL_CHECKPOINT on the server.");
     notes.push(state.aiAvailable
       ? "Cited vision/web research is configured."
       : "For cited research, set CADPRO_AI_ENRICHMENT=1 and OPENAI_API_KEY on the server.");
@@ -607,6 +647,8 @@ async function loadCapabilities() {
       ? "The optional non-metric concept-mesh worker is connected."
       : "The validated local STEP path remains fully available without a concept-mesh worker.");
     $("#ai-note").textContent = notes.join(" ");
+    syncNeuralControls();
+    renderSelection();
   } catch (_error) {
     $("#engine-status").classList.add("offline");
     $("#engine-status").innerHTML = "<span></span> Geometry engine unavailable";
@@ -635,6 +677,10 @@ fileInput.addEventListener("change", () => chooseFiles(fileInput.files));
 $("#clear-files").addEventListener("click", () => { resetFiles(); renderSelection(); });
 $("#width-mm").addEventListener("input", renderSelection);
 $("#depth-mm").addEventListener("input", renderSelection);
+$("#neural-predict").addEventListener("change", () => {
+  syncNeuralControls();
+  renderSelection();
+});
 $("#view-count").addEventListener("input", (event) => {
   $("#view-output").textContent = event.target.value;
   renderSelection();

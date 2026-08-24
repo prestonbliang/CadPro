@@ -1,0 +1,4 @@
+{"image":"training/images/bracket-001.png","width_mm":120.0,"depth_mm":28.0}
+{"image":"training/images/bracket-002.png","width_mm":84.5,"depth_mm":16.0}
+{"image":"training/images/bracket-003.png","step":"training/steps/bracket-003.step"}
+{"image":"training/images/bracket-004.png","step":"training/steps/bracket-004.step"}

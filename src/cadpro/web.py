@@ -43,6 +43,7 @@ from cadpro.media import (
     validated_image_size,
 )
 from cadpro.ml_mesh import ConceptMeshConfig
+from cadpro.neural import NeuralCheckpointError, NeuralConfig, NeuralDepthModel
 
 
 MIN_PHOTOS = 20
@@ -176,6 +177,7 @@ class Job:
     metrics: dict[str, Any] | None = None
     input_diagnostics: list[dict[str, Any]] | None = None
     enrichment: dict[str, Any] | None = None
+    neural_prediction: dict[str, Any] | None = None
     concept_mesh: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     future: Future[None] | None = None
@@ -400,6 +402,9 @@ class JobManager:
                         "metrics": dict(job.metrics or {}),
                         "input_diagnostics": list(job.input_diagnostics or []),
                         "enrichment": dict(job.enrichment) if job.enrichment else None,
+                        "neural_prediction": (
+                            dict(job.neural_prediction) if job.neural_prediction else None
+                        ),
                         "concept_mesh": dict(job.concept_mesh) if job.concept_mesh else None,
                     }
                 return {
@@ -474,7 +479,13 @@ class JobManager:
             manifest = self._runner(job)
             job.advance("export", 90)
             artifacts = _register_artifacts(manifest, job.output_dir)
-            metrics, input_diagnostics, enrichment, concept_mesh = _result_metadata(manifest)
+            (
+                metrics,
+                input_diagnostics,
+                enrichment,
+                neural_prediction,
+                concept_mesh,
+            ) = _result_metadata(manifest)
             if not artifacts:
                 raise RuntimeError("Reconstruction did not produce any downloadable artifacts.")
         except Exception as error:  # The worker must always reach a terminal state.
@@ -495,6 +506,7 @@ class JobManager:
                 job.metrics = metrics
                 job.input_diagnostics = input_diagnostics
                 job.enrichment = enrichment
+                job.neural_prediction = neural_prediction
                 job.concept_mesh = concept_mesh
                 job.status = "completed"
                 job.advance("complete", 100)
@@ -531,7 +543,11 @@ class JobManager:
             shutil.rmtree(job.root, ignore_errors=True)
 
 
-def _run_reconstruction(job: Job) -> object:
+def _run_reconstruction(
+    job: Job,
+    *,
+    neural_model: NeuralDepthModel | None = None,
+) -> object:
     """The one integration seam between the web queue and reconstruction engine."""
     from cadpro.artifacts import export_artifacts
     from cadpro.enrichment import (
@@ -553,6 +569,7 @@ def _run_reconstruction(job: Job) -> object:
     )
 
     enrichment: dict[str, Any] | None = None
+    neural_prediction: dict[str, Any] | None = None
     concept_mesh: dict[str, Any] | None = None
     concept_mesh_path: Path | None = None
     optional_requested = bool(
@@ -592,10 +609,22 @@ def _run_reconstruction(job: Job) -> object:
 
     job.advance("segment", 35)
     if job.kind == "image":
+        depth_mm = job.parameters.get("depth_mm")
+        if job.parameters.get("neural_predict"):
+            if neural_model is None:
+                raise RuntimeError("The configured neural depth model is unavailable.")
+            prediction = neural_model.predict(
+                job.input_paths[0],
+                measured_width_mm=job.parameters["width_mm"],
+            )
+            depth_mm = prediction.depth_mm
+            neural_prediction = prediction.to_dict()
+        if not isinstance(depth_mm, (int, float)):
+            raise RuntimeError("One-photo reconstruction needs a depth value or neural prediction.")
         reconstruction = reconstruct_single_image(
             job.input_paths[0],
             width_mm=job.parameters["width_mm"],
-            depth_mm=job.parameters["depth_mm"],
+            depth_mm=float(depth_mm),
             on_profile_ready=lambda: job.advance("reconstruct", 68),
         )
     elif job.kind == "photos":
@@ -615,6 +644,8 @@ def _run_reconstruction(job: Job) -> object:
         )
     if enrichment is not None:
         reconstruction = replace(reconstruction, enrichment=enrichment)
+    if neural_prediction is not None:
+        reconstruction = replace(reconstruction, neural_prediction=neural_prediction)
     job.advance("reconstruct", 68)
     job.advance("export", 86)
     cad_manifest = export_artifacts(reconstruction, job.output_dir, stem="cadpro-model")
@@ -954,11 +985,24 @@ def create_app(
         raise ValueError("request_overhead_bytes cannot be negative")
 
     assets = Path(asset_dir).resolve() if asset_dir is not None else ASSET_DIR.resolve()
-    runner = reconstruction_runner or _run_reconstruction
     public_origin = _configured_public_origin()
     allowed_hosts = _configured_trusted_hosts(public_origin, trusted_hosts)
     intelligence_config = EnrichmentConfig.from_env()
     concept_mesh_config = ConceptMeshConfig.from_env()
+    neural_config = NeuralConfig.from_env()
+    neural_model: NeuralDepthModel | None = None
+    neural_checkpoint_valid = False
+    if neural_config.available and neural_config.checkpoint is not None:
+        try:
+            neural_model = NeuralDepthModel.load(neural_config.checkpoint)
+            neural_checkpoint_valid = True
+        except NeuralCheckpointError:
+            neural_model = None
+    runner = (
+        reconstruction_runner
+        if reconstruction_runner is not None
+        else lambda job: _run_reconstruction(job, neural_model=neural_model)
+    )
     image_request_bytes = max_image_bytes + request_overhead_bytes
     photo_request_bytes = min(
         max_photo_set_bytes, max_image_bytes * MAX_PHOTOS
@@ -1078,6 +1122,21 @@ def create_app(
                 "web_search": intelligence_config.available,
                 "geometry_mutation": False,
             },
+            "neural_prediction": {
+                "available": neural_model is not None,
+                "enabled": neural_config.enabled,
+                "checkpoint_valid": neural_checkpoint_valid,
+                "model_type": "numpy_mlp_depth_regressor",
+                "predicts": "depth_to_width_ratio",
+                "changes_geometry": True,
+                "requires_measured_width": True,
+                "trained_examples": (
+                    neural_model.trained_examples if neural_model is not None else None
+                ),
+                "validation_examples": (
+                    neural_model.validation_examples if neural_model is not None else None
+                ),
+            },
             "concept_mesh": {
                 "available": concept_mesh_config.available,
                 "provider": "hunyuan-compatible-worker",
@@ -1103,9 +1162,13 @@ def create_app(
             Form(gt=0, le=MAX_WIDTH_MM, description="Known maximum object width in millimeters."),
         ],
         depth_mm: Annotated[
-            float,
+            float | None,
             Form(gt=0, le=MAX_WIDTH_MM, description="Desired extrusion depth in millimeters."),
-        ],
+        ] = None,
+        neural_predict: Annotated[
+            bool,
+            Form(description="Predict extrusion depth with the configured trained neural model."),
+        ] = False,
         ai_enhance: Annotated[
             bool,
             Form(description="Run optional vision analysis and cited web-reference research."),
@@ -1130,8 +1193,12 @@ def create_app(
             )
         upload = file[0]
         _validate_dimension(width_mm, field="width_mm")
-        _validate_dimension(depth_mm, field="depth_mm")
         try:
+            neural_parameters = _neural_parameters(
+                neural_predict,
+                depth_mm,
+                neural_model,
+            )
             intelligence_parameters = _intelligence_parameters(
                 ai_enhance,
                 object_hint,
@@ -1165,7 +1232,7 @@ def create_app(
                 input_paths=[destination],
                 parameters={
                     "width_mm": width_mm,
-                    "depth_mm": depth_mm,
+                    **neural_parameters,
                     **intelligence_parameters,
                     **concept_mesh_parameters,
                 },
@@ -1411,6 +1478,32 @@ def _validate_dimension(value: float, *, field: str) -> None:
         )
 
 
+def _neural_parameters(
+    requested: bool,
+    depth_mm: float | None,
+    model: NeuralDepthModel | None,
+) -> dict[str, Any]:
+    if requested:
+        if model is None:
+            raise ApiError(
+                409,
+                "neural_model_unavailable",
+                (
+                    "A trained neural checkpoint is not configured on this server. "
+                    "Enter a measured extrusion depth or train and enable a checkpoint."
+                ),
+            )
+        return {"neural_predict": True}
+    if depth_mm is None:
+        raise ApiError(
+            422,
+            "invalid_request",
+            "Enter extrusion depth or request the configured neural depth prediction.",
+        )
+    _validate_dimension(depth_mm, field="depth_mm")
+    return {"depth_mm": depth_mm}
+
+
 def _intelligence_parameters(
     requested: bool,
     object_hint: str,
@@ -1605,6 +1698,7 @@ def _result_metadata(
     list[dict[str, Any]],
     dict[str, Any] | None,
     dict[str, Any] | None,
+    dict[str, Any] | None,
 ]:
     """Copy non-path export metadata into the public completion result."""
     metadata_source = (
@@ -1627,6 +1721,11 @@ def _result_metadata(
         if isinstance(metadata_source, Mapping)
         else getattr(metadata_source, "enrichment", None)
     )
+    neural_prediction_value = (
+        metadata_source.get("neural_prediction")
+        if isinstance(metadata_source, Mapping)
+        else getattr(metadata_source, "neural_prediction", None)
+    )
     concept_mesh_value = (
         manifest.get("concept_mesh")
         if isinstance(manifest, Mapping)
@@ -1646,10 +1745,13 @@ def _result_metadata(
     enrichment = _json_metadata(enrichment_value)
     if not isinstance(enrichment, dict):
         enrichment = None
+    neural_prediction = _json_metadata(neural_prediction_value)
+    if not isinstance(neural_prediction, dict):
+        neural_prediction = None
     concept_mesh = _json_metadata(concept_mesh_value)
     if not isinstance(concept_mesh, dict):
         concept_mesh = None
-    return metrics, diagnostics, enrichment, concept_mesh
+    return metrics, diagnostics, enrichment, neural_prediction, concept_mesh
 
 
 def _json_metadata(value: object, *, _depth: int = 0) -> Any:

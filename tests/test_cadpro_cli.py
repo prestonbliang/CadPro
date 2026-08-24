@@ -1,4 +1,5 @@
 import os
+import json
 
 import cv2
 import numpy as np
@@ -84,3 +85,62 @@ def test_web_command_uses_its_actual_origin_and_disables_forwarded_headers(monke
     assert calls == [
         (("cadpro.web:app",), {"host": "::1", "port": 8765, "log_level": "info", "proxy_headers": False})
     ]
+
+
+def test_neural_training_and_prediction_commands_create_checkpoint_and_step(tmp_path):
+    images = []
+    records = []
+    for index, object_width in enumerate((44, 52, 60, 68)):
+        source = tmp_path / f"sample-{index}.png"
+        image = np.full((100, 120, 3), 255, dtype=np.uint8)
+        left = (120 - object_width) // 2
+        cv2.rectangle(image, (left, 20), (left + object_width, 80), (0, 0, 0), -1)
+        assert cv2.imwrite(str(source), image)
+        images.append(source)
+        records.append(
+            json.dumps(
+                {
+                    "image": source.name,
+                    "width_mm": 100,
+                    "depth_mm": 12 + index * 4,
+                }
+            )
+        )
+    manifest = tmp_path / "dataset.jsonl"
+    manifest.write_text("\n".join(records), encoding="utf-8")
+    checkpoint = tmp_path / "model.npz"
+
+    trained = CliRunner().invoke(
+        app,
+        [
+            "neural-train",
+            str(manifest),
+            "--checkpoint",
+            str(checkpoint),
+            "--epochs",
+            "5",
+            "--validation-fraction",
+            "0",
+        ],
+    )
+    assert trained.exit_code == 0, trained.output
+    assert checkpoint.is_file()
+    assert "Trained" in trained.output
+
+    output = tmp_path / "prediction.step"
+    predicted = CliRunner().invoke(
+        app,
+        [
+            "neural-predict",
+            str(images[0]),
+            "--checkpoint",
+            str(checkpoint),
+            "--width-mm",
+            "100",
+            "--output",
+            str(output),
+        ],
+    )
+    assert predicted.exit_code == 0, predicted.output
+    assert output.is_file()
+    assert "predicted depth" in predicted.output

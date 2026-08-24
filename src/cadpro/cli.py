@@ -15,7 +15,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 @app.callback()
 def main() -> None:
-    """Create measured STEP CAD models and compare CAD geometry."""
+    """Train image-to-CAD models, create validated STEP solids, and compare geometry."""
 
 
 @app.command()
@@ -68,6 +68,98 @@ def turntable(
     typer.echo(
         f"Created {result.output} from {len(result.sampled_frames)} turntable views "
         f"(frames {frames}), scaled to {width_mm:g} mm maximum width"
+    )
+
+
+@app.command("neural-train")
+def neural_train(
+    manifest: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="UTF-8 JSONL file of image/dimension or aligned image/STEP pairs.",
+    ),
+    checkpoint: Path = typer.Option(
+        Path("cadpro-depth-model.npz"),
+        "--checkpoint",
+        "-c",
+        help="Destination data-only neural checkpoint.",
+    ),
+    epochs: int = typer.Option(200, min=1, max=100_000, help="Training passes over the dataset."),
+    batch_size: int = typer.Option(16, min=1, max=4096, help="Examples per Adam update."),
+    learning_rate: float = typer.Option(0.001, min=0.000001, max=1.0),
+    validation_fraction: float = typer.Option(0.2, min=0.0, max=0.49),
+    seed: int = typer.Option(17, min=0, max=2_147_483_647),
+) -> None:
+    """Train the image-to-CAD depth network and write a safe NPZ checkpoint."""
+    from cadpro.neural import NeuralModelError, train_from_manifest
+
+    try:
+        summary = train_from_manifest(
+            manifest,
+            checkpoint,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            validation_fraction=validation_fraction,
+            seed=seed,
+        )
+    except (FileNotFoundError, ValueError, NeuralModelError) as error:
+        raise typer.BadParameter(str(error)) from error
+    typer.echo(
+        f"Trained {summary.checkpoint} from {summary.examples} examples for "
+        f"{summary.epochs} epochs; validation relative MAE "
+        f"{summary.validation_relative_mae:.4f}"
+    )
+
+
+@app.command("neural-predict")
+def neural_predict(
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="One clean square-on object image.",
+    ),
+    checkpoint: Path = typer.Option(
+        ...,
+        "--checkpoint",
+        "-c",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Trained CadPro .npz checkpoint.",
+    ),
+    width_mm: float = typer.Option(
+        ...,
+        min=0.001,
+        help="Measured real-world width of the visible object.",
+    ),
+    output: Path = typer.Option(
+        Path("neural-model.step"),
+        "--output",
+        "-o",
+        help="Destination STEP file.",
+    ),
+) -> None:
+    """Predict hidden depth from one image and build a validated STEP solid."""
+    from cadpro.neural import NeuralModelError, predict_step
+
+    try:
+        result, prediction = predict_step(
+            input_path,
+            checkpoint,
+            measured_width_mm=width_mm,
+            output_path=output,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, NeuralModelError) as error:
+        raise typer.BadParameter(str(error)) from error
+    typer.echo(
+        f"Created {result}: predicted depth {prediction.depth_mm:g} mm "
+        f"({prediction.depth_ratio:.4f} x measured width), heuristic confidence "
+        f"{prediction.confidence_score:.2f}. Verify the estimate before manufacturing."
     )
 
 

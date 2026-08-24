@@ -49,6 +49,7 @@ class Reconstruction:
     mode: Literal["image", "photos", "video"]
     source_names: tuple[str, ...]
     enrichment: Mapping[str, Any] | None = None
+    neural_prediction: Mapping[str, Any] | None = None
 
     @property
     def input_diagnostics(self) -> tuple[InputDiagnostic, ...]:

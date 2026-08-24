@@ -54,6 +54,7 @@ class ArtifactManifest:
     metrics: GeometryMetrics
     input_diagnostics: tuple[InputDiagnostic, ...]
     enrichment: dict[str, object] | None
+    neural_prediction: dict[str, object] | None = None
 
     @property
     def step(self) -> Path:
@@ -168,6 +169,9 @@ def export_artifacts(
         metrics=metrics,
         input_diagnostics=diagnostics,
         enrichment=(dict(reconstruction.enrichment) if reconstruction.enrichment else None),
+        neural_prediction=(
+            dict(reconstruction.neural_prediction) if reconstruction.neural_prediction else None
+        ),
     )
 
 
@@ -287,6 +291,8 @@ def _report_document(
     }
     if reconstruction.enrichment:
         report["enrichment"] = dict(reconstruction.enrichment)
+    if reconstruction.neural_prediction:
+        report["neural_prediction"] = dict(reconstruction.neural_prediction)
     return report
 
 

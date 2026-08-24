@@ -16,11 +16,11 @@ CadPro is measurement-driven reconstruction, not a magic recovery of hidden desi
 Read [Technical truth and limitations](#technical-truth-and-limitations) before using an
 output for engineering or manufacturing.
 
-## Version 2.0 capability contract
+## Version 2.1 capability contract
 
 | Website mode | Required input | Measurement | Geometry produced |
 | --- | --- | --- | --- |
-| One photo | Exactly one square-on object image | Real profile width and chosen depth | Measured 2.5D silhouette/profile extrusion |
+| One photo | Exactly one square-on object image | Real profile width; chosen depth or trained neural depth estimate | Measurement-scaled 2.5D silhouette/profile extrusion |
 | Photo orbit | 20–50 ordered, evenly spaced photos | Real maximum width | Measurement-scaled silhouette visual hull |
 | Turntable video | Exactly one steady full-revolution video; choose 20–50 sampled views | Real maximum width | Measurement-scaled silhouette visual hull |
 
@@ -29,8 +29,11 @@ OpenCascade export pipeline, and artifact verification. A completed STEP file is
 rejected unless it contains exactly one valid, connected, positive-volume solid. STL and GLB
 are validated as non-empty geometry before the result is published.
 
-Version 2.0 includes:
+Version 2.1 includes:
 
+- a trainable local neural network that predicts bounded depth-to-width ratios from images;
+- JSONL datasets using labeled dimensions or aligned image/STEP training pairs;
+- safe data-only NPZ checkpoints, Adam training, CLI inference, and website inference;
 - responsive one-photo, photo-orbit, and turntable-video workflows;
 - browser- and server-side file count, type, byte, pixel, and measurement limits;
 - order-preserving photo upload with sequential, memory-bounded thumbnail inspection;
@@ -72,12 +75,14 @@ open a browser automatically.
 1. Put the object against a plain background that strongly contrasts with its outline.
 2. Photograph the desired profile square-on, with the whole object clear of every edge.
 3. Choose **One photo** and select one JPEG, PNG, WebP, or BMP image.
-4. Enter the object's measured horizontal width and the uniform depth to extrude.
+4. Enter the object's measured horizontal width and either enter the uniform depth or select a
+   configured trained neural checkpoint to predict it.
 5. Build, inspect the preview, download the files, and verify critical dimensions in CAD.
 
 CadPro extracts the visible outline and enclosed openings, scales the outline to the entered
-width, and extrudes it by the exact chosen depth. The depth is a design input, not something
-inferred from the image. A visible enclosed opening becomes a through-hole.
+width, and extrudes it by the chosen or predicted depth. Manual depth is an exact design input;
+neural depth is a learned estimate recorded in the result and report. A visible enclosed opening
+becomes a through-hole.
 
 ### Ordered photo orbit
 
@@ -106,6 +111,73 @@ angular coverage but cannot reveal a feature that never changes an outside silho
 Image files are limited to 25 MiB each, 12.5 million pixels, and 8,192 pixels on either edge.
 A photo set is limited to 500 MiB and a video to 2 GiB. Server settings can lower these byte
 limits. Measurements must be finite and greater than zero.
+
+## Trainable neural image-to-STEP prediction
+
+CadPro 2.1 includes a real train/predict pipeline in `src/cadpro/neural.py`. It converts each
+image into a normalized 24 x 24 silhouette raster plus aspect, foreground, hole, and symmetry
+features. A two-hidden-layer neural network learns the logarithmic depth-to-width ratio. At
+inference time, the user still supplies one real width measurement; the model predicts depth,
+the image supplies the visible profile, and OpenCascade builds and validates the STEP solid.
+
+This design learns a useful hidden parameter without pretending that one image contains unseen
+topology. It does not infer backside outlines, side holes, pockets, threads, tolerances, or native
+feature history.
+
+### Prepare training data
+
+Create a UTF-8 JSON Lines file with at least four samples. Production models should use a
+representative, carefully measured dataset with separate validation objectsâ€”normally hundreds
+or thousands of examples, not the four-sample smoke-test minimum.
+See `examples/neural_dataset.jsonl.example` for a copyable mixed-label manifest.
+
+Use explicit labels:
+
+```json
+{"image":"images/bracket-001.png","width_mm":120.0,"depth_mm":28.0}
+{"image":"images/bracket-002.png","width_mm":84.5,"depth_mm":16.0}
+```
+
+Or pair an image with one aligned STEP solid:
+
+```json
+{"image":"images/bracket-003.png","step":"steps/bracket-003.step"}
+```
+
+For STEP-paired training, align the solid so X is the photographed horizontal width and Z is the
+hidden extrusion depth. CadPro rejects files without exactly one solid and derives the labels
+from the STEP bounding box. Relative paths are resolved from the manifest directory.
+
+### Train and predict
+
+```powershell
+.venv\Scripts\cadpro.exe neural-train dataset.jsonl `
+  --checkpoint models/cadpro-depth-model.npz `
+  --epochs 300 --batch-size 16 --validation-fraction 0.2
+
+.venv\Scripts\cadpro.exe neural-predict bracket.png `
+  --checkpoint models/cadpro-depth-model.npz `
+  --width-mm 120 --output bracket-neural.step
+```
+
+Training uses deterministic NumPy operations and Adam optimization, so no multi-gigabyte ML
+framework is required. Checkpoints contain arrays and JSON metadata only and are loaded with
+pickle disabled. Validate a checkpoint on held-out objects from the same capture process before
+enabling it for users.
+
+### Enable the trained model on the website
+
+```powershell
+$env:CADPRO_NEURAL_ENABLED = "1"
+$env:CADPRO_NEURAL_CHECKPOINT = "C:\absolute\path\to\cadpro-depth-model.npz"
+.venv\Scripts\cadpro.exe web
+```
+
+Choose **One photo**, enter the measured width, and select **Predict hidden depth with a trained
+neural network**. The result page and JSON report show the predicted depth, learned ratio,
+validation error, heuristic confidence score, and explicit manufacturing warnings. Checkpoint
+paths are never returned by the health or job APIs. A checkpoint trained without a held-out
+validation split receives an automatic confidence penalty.
 
 ## Optional AI and cited web enrichment
 
@@ -244,6 +316,11 @@ One-photo mode cannot determine:
 - hidden cavities, internal structure, threads, tolerances, or material; or
 - whether a visible opening is a through-hole or a blind pocket.
 
+A neural checkpoint can learn statistical depth patterns from its labeled dataset, but that
+does not turn its prediction into an observation. Dataset bias, capture differences, and
+out-of-distribution objects can produce confident-looking but wrong depths. Always retain the
+measured width and independently verify the predicted dimension.
+
 Photo-orbit and video modes add outside shape coverage, but a silhouette visual hull still
 cannot recover concavities, cavities, holes, or recesses that never affect an outline. It can
 also overfill space between visible limbs or features. It is not texture-based photogrammetry,
@@ -278,6 +355,7 @@ downloads every artifact, and reloads the generated STEP solids.
 src/cadpro/web.py          three-mode API, job queue, request guards, artifact security
 src/cadpro/web_assets/     responsive capture, calibration, progress, and result interface
 src/cadpro/reconstruct.py  profile extrusion and ordered silhouette visual-hull reconstruction
+src/cadpro/neural.py       trainable depth model, safe checkpoints, image features, STEP inference
 src/cadpro/enrichment.py   optional OpenAI vision and cited web-reference report enrichment
 src/cadpro/ml_mesh.py      optional external concept-mesh worker client and GLB validation
 src/cadpro/artifacts.py    STEP/STL/GLB/preview/report export and verification
